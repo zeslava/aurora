@@ -95,9 +95,38 @@
     };
 
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Нативный HLS (webOS, Safari): аналога startPosition нет, позиция ставится
+      // единственным seek'ом сразу после метаданных — и ровно один раз, иначе
+      // повторные seek'и гоняют плеер по таймлайну.
+      const startNative = untrack(() => startTime);
+      // Диагностика нативной ветки: консоль доступна только через `ares-inspect`, и без
+      // этих строк с ТВ не видно ничего — ни куда встал playhead, ни что в буфере.
+      const ranges = () =>
+        Array.from({ length: video.buffered.length }, (_, i) =>
+          `${video.buffered.start(i).toFixed(1)}..${video.buffered.end(i).toFixed(1)}`
+        ).join(',') || 'пусто';
+      const trace = (event: string) =>
+        console.log(
+          `нативный HLS: ${event}, currentTime=${video.currentTime.toFixed(1)}, ` +
+            `readyState=${video.readyState}, буфер=[${ranges()}]`
+        );
+      for (const event of ['seeking', 'seeked', 'waiting', 'stalled', 'playing', 'ended']) {
+        video.addEventListener(event, () => trace(event));
+      }
+
       video.src = source;
       video.load();
-      video.addEventListener('loadedmetadata', playIfNeeded, { once: true });
+      video.addEventListener(
+        'loadedmetadata',
+        () => {
+          console.log(
+            `нативный HLS: метаданные, duration=${video.duration}, стартовая позиция=${startNative}`
+          );
+          if (startNative > 0) video.currentTime = startNative;
+          playIfNeeded();
+        },
+        { once: true }
+      );
     } else if (Hls.isSupported()) {
       // Плейлист отдаётся, как только ffmpeg записал первый сегмент, но запуск
       // кодирования может занять несколько секунд — стандартный 10-секундный
@@ -106,7 +135,9 @@
         manifestLoadingTimeOut: 60000,
         manifestLoadingMaxRetry: 2,
         manifestLoadingRetryDelay: 2000,
-        startPosition: startTime,
+        // untrack: иначе эффект зависит от startTime и на каждом обновлении позиции
+        // пересоздаёт Hls — плеер начинал бы поток заново.
+        startPosition: untrack(() => startTime),
       });
       // Без этого обработчика фатальные ошибки hls.js проявляются как «видео просто встало»
       hls.on(Hls.Events.ERROR, (_e, data) => {
@@ -246,10 +277,11 @@
     };
   });
 
-  // Загружаем сохраненную позицию (для потоков с офсетом её уже отработал сервер)
+  // Загружаем сохранённую позицию только для прямого потока: у HLS её ставит startPosition,
+  // а у потока с офсетом — сервер.
   $effect(() => {
     const start = startTime;
-    if (offsetActive) return;
+    if (offsetActive || isHls) return;
     if (videoEl && start > 0 && videoEl.readyState >= 2) {
       videoEl.currentTime = start;
     }
@@ -698,10 +730,9 @@
       );
     }
 
-    // Для потоков с офсетом сервер уже начал с нужной секунды — seek не нужен
-    if (startTime > 0 && !offsetActive) {
-      videoEl.currentTime = startTime;
-    }
+    // Позицию HLS задаёт только startPosition в конфиге hls.js. Ручной seek здесь ставил её
+    // второй раз: плеер успевал начать с нуля, потом прыгал на сохранённую секунду, hls.js
+    // перезапрашивал init и уходил тянуть сегменты до конца файла, ни разу не начав играть.
   };
 </script>
 
