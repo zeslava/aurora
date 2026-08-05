@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    // ESNext = актуальные типы ES2026 (using/Symbol.dispose, Error.isError,
+    // Math.sumPrecise, Array.fromAsync). Реальный уровень вывода задаёт
+    // build.target в vite.config.ts, здесь только проверка типов (noEmit).
+    "target": "ESNext",
+    "useDefineForClassFields": true,
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "types": ["svelte", "vite/client", "node"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts"]
+}

@@ -1,0 +1,17 @@
+/target
+aurora.db
+frontend/node_modules
+frontend/dist
+frontend/.env
+frontend-react/
+.env*
+!.env.example
+/vendor
+cache
+.cache/
+/data
+/media
+/package.json
+/package-lock.json
+graphify-out/.graphify_root
+graphify-out/.graphify_python

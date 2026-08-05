@@ -1,0 +1,123 @@
+version: '3'
+
+dotenv: ['.env']
+
+vars:
+  FRONTEND_DIR: frontend
+  WEBOS_DEVICE: '{{.WEBOS_DEVICE | default "LGTV"}}'
+  WEBOS_APP_ID: com.aurora.mediaserver
+
+tasks:
+  default:
+    desc: Список задач
+    cmds:
+      - task --list
+    silent: true
+
+  dev:
+    desc: Локальный запуск бэкенда и фронтенда (Vite) параллельно
+    deps: [backend, frontend]
+
+  backend:
+    desc: Запуск бэкенда (cargo run, порт 4000, БД ./data/aurora.db)
+    cmds:
+      - cargo run
+
+  frontend:
+    desc: Vite dev-сервер фронтенда
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - npm run dev
+
+  install:
+    desc: Установка зависимостей фронтенда
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - npm install
+
+  build:
+    desc: Полная сборка (фронтенд + релизный бинарь)
+    deps: [build-frontend]
+    cmds:
+      - cargo build --release
+
+  build-frontend:
+    desc: Сборка фронтенда в frontend/dist
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - npm run build
+
+  run:
+    desc: Запуск собранного релизного бинаря (нужен build)
+    cmds:
+      - mkdir -p data
+      - ./target/release/aurora
+
+  test:
+    desc: Запуск тестов
+    cmds:
+      - cargo test
+
+  test-unit:
+    desc: Быстрые unit-тесты (parse_range, range_start_seconds, кодеки) без ffmpeg
+    cmds:
+      - cargo test --bin aurora -- parse_range range_start_seconds needs_video_transcoding
+
+  test-integration:
+    desc: Интеграционные тесты стриминга/промотки (нужен ffmpeg/ffprobe в PATH)
+    cmds:
+      - cargo test --bin aurora -- --nocapture direct_stream transcoded
+
+  lint:
+    desc: clippy + fmt --check
+    cmds:
+      - cargo clippy
+      - cargo fmt --check
+
+  fmt:
+    desc: Форматирование
+    cmds:
+      - cargo fmt
+
+  webos-build:
+    desc: 'Сборка .ipk для webOS (адрес сервера: AURORA_SERVER_URL или ввод в приложении)'
+    cmds:
+      - ./scripts/build-webos.sh {{.CLI_ARGS}}
+
+  webos-devices:
+    desc: Список настроенных webOS-устройств (настройка - ares-setup-device)
+    cmds:
+      - ares-setup-device --list
+
+  webos-install:
+    desc: 'Установка собранного .ipk на телевизор (WEBOS_DEVICE=tv)'
+    cmds:
+      - ares-install --device {{.WEBOS_DEVICE}} $(ls -t build/ipk/*.ipk | head -1)
+
+  webos-launch:
+    desc: Запуск приложения на телевизоре
+    cmds:
+      - ares-launch --device {{.WEBOS_DEVICE}} {{.WEBOS_APP_ID}}
+
+  webos-deploy:
+    desc: Сборка .ipk + установка + запуск на телевизоре
+    cmds:
+      - task: webos-build
+      - task: webos-install
+      - task: webos-launch
+
+  webos-uninstall:
+    desc: Удаление приложения с телевизора
+    cmds:
+      - ares-uninstall --device {{.WEBOS_DEVICE}} {{.WEBOS_APP_ID}}
+
+  docker-up:
+    desc: Запуск в Docker (та же БД ./data/aurora.db через bind-mount)
+    cmds:
+      - mkdir -p data
+      - docker compose up --build
+
+  docker-down:
+    desc: Остановка Docker
+    cmds:
+      - docker compose down

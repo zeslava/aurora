@@ -1,0 +1,14 @@
+{
+  "id": "com.aurora.mediaserver",
+  "version": "0.1.0",
+  "vendor": "Aurora",
+  "type": "web",
+  "main": "index.html",
+  "title": "Aurora",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "bgColor": "#0f172a",
+  "iconColor": "#0f172a",
+  "disableBackHistoryAPI": false,
+  "supportPortraitMode": false
+}

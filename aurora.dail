@@ -1,0 +1,25 @@
+FROM 15.0-RELEASE
+
+# ffmpeg/ffprobe обязательны: probe метаданных и транскодирование аудио
+RUN pkg install -y ffmpeg
+
+SERVICE aurora
+LOG /var/log/aurora/aurora.log
+
+WORKDIR /var/db/aurora
+
+ENV PORT=4000
+ENV DB_PATH=sqlite:/var/db/aurora/aurora.db
+ENV CACHE_DIR=/var/db/aurora/cache
+ENV MEDIA_PATHS=/media
+ENV LOG_LEVEL=info
+# Обязательно переопределить при запуске: -e JWT_SECRET=... -e TMDB_API_KEY=...
+ENV TMDB_LANGUAGE=ru-RU
+
+COPY --chown=aurora:aurora target/release/aurora /usr/local/bin/aurora
+
+RUN mkdir -p /var/db/aurora/cache/images /media
+
+EXPOSE 4000
+
+CMD /usr/local/bin/aurora

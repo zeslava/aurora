@@ -1,0 +1,28 @@
+{
+  "name": "aurora-frontend",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && stylelint \"src/**/*.{css,svelte}\" && vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "preview": "vite preview",
+    "lint:css": "stylelint \"src/**/*.{css,svelte}\""
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "hls.js": "^1.6.16"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@types/node": "^26.1.2",
+    "postcss-html": "^2.0.0",
+    "stylelint": "^17.14.1",
+    "stylelint-config-standard": "^40.0.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "tslib": "^2.6.2",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.8"
+  }
+}

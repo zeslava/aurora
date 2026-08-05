@@ -1,0 +1,91 @@
+{
+  "extends": "stylelint-config-standard",
+  "overrides": [
+    {
+      "files": [
+        "**/*.svelte"
+      ],
+      "customSyntax": "postcss-html"
+    },
+    {
+      "comment": "tokens.css — источник значений системы: сырые цвета и размеры разрешены только здесь",
+      "files": [
+        "src/tokens.css"
+      ],
+      "rules": {
+        "color-no-hex": null,
+        "function-disallowed-list": null,
+        "declaration-property-value-allowed-list": null
+      }
+    }
+  ],
+  "rules": {
+    "custom-property-pattern": null,
+    "selector-class-pattern": null,
+    "no-descending-specificity": null,
+    "declaration-block-no-redundant-longhand-properties": null,
+    "alpha-value-notation": null,
+    "value-keyword-case": null,
+    "custom-property-empty-line-before": null,
+    "comment-empty-line-before": null,
+    "declaration-empty-line-before": null,
+    "color-no-hex": [
+      true,
+      {
+        "message": "Цвета — только через var(--*). Палитра живёт в src/tokens.css."
+      }
+    ],
+    "function-disallowed-list": [
+      "rgb",
+      "rgba",
+      "hsl"
+    ],
+    "declaration-property-value-allowed-list": {
+      "/^(padding|margin|gap|border-radius)/": [
+        "/^var\\(--/",
+        "/^calc\\(/",
+        "/^(0|auto|inherit|initial|unset)$/",
+        "/^100%$/"
+      ],
+      "font-size": [
+        "/^var\\(--/",
+        "/^(min|max|clamp)\\(/",
+        "/^[\\d.]+em$/",
+        "/^(inherit|initial|unset)$/"
+      ],
+      "font-weight": [
+        "/^var\\(--/",
+        "/^(inherit|initial|unset|normal|bold)$/"
+      ],
+      "z-index": [
+        "/^var\\(--/",
+        "/^(auto|0|-1)$/"
+      ],
+      "transition-duration": [
+        "/^var\\(--/",
+        "/^1ms$/"
+      ],
+      "color": [
+        "/^var\\(--/",
+        "/^(inherit|initial|unset|transparent|currentcolor)$/"
+      ],
+      "background-color": [
+        "/^var\\(--/",
+        "/^(inherit|initial|unset|transparent|currentcolor)$/"
+      ]
+    },
+    "media-feature-name-value-allowed-list": {
+      "/^(min|max)-width$/": [
+        "/^(639|640|768|1024|1280|1600|1900)px$/"
+      ]
+    },
+    "import-notation": "string",
+    "media-feature-range-notation": "prefix",
+    "property-no-vendor-prefix": null,
+    "color-hex-length": null
+  },
+  "ignoreFiles": [
+    "dist/**",
+    "node_modules/**"
+  ]
+}

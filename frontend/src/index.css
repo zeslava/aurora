@@ -1,0 +1,579 @@
+/* ─────────────────────────────────────────────────────────────
+   Aurora — дизайн-система: база и общие классы.
+   Токены — в tokens.css, всё остальное — в scoped-стилях компонентов.
+   ───────────────────────────────────────────────────────────── */
+
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Анимации плиток и оверлеев дороги на ТВ-железе и мешают тем,
+   кому движение противопоказано */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Общий масштаб интерфейса. Все токены (--text-*, --space-*, --container)
+   заданы в rem, поэтому корневой font-size тянет весь UI разом.
+   [data-tv] выставляет initTvMode() — просмотр с дивана. */
+/* stylelint-disable declaration-property-value-allowed-list -- px здесь
+   и есть определение шкалы: всё остальное считается от неё в rem */
+html {
+  font-size: 16px;
+}
+
+@media (min-width: 1600px) {
+  html {
+    font-size: 18px;
+  }
+}
+
+@media (min-width: 1900px) {
+  html {
+    font-size: 20px;
+  }
+}
+
+html[data-tv] {
+  font-size: 22px;
+}
+/* stylelint-enable declaration-property-value-allowed-list */
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--bg);
+  color: var(--text);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* Видимый фокус для D-pad-навигации на ТВ */
+:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+/* На webOS 2020− :focus-visible может отсутствовать — подстраховываемся */
+@supports not selector(:focus-visible) {
+  :focus {
+    outline: 3px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+}
+
+/* Magic Remote: в курсорном режиме D-pad-обводка не нужна — работает hover/click,
+   курсор сам подсвечивает элемент. Ставим :focus (для фолбэка выше) и
+   :focus-visible под курсором. */
+html[data-input-mode='pointer'] :focus,
+html[data-input-mode='pointer'] :focus-visible {
+  outline: none;
+}
+
+/* ── Каркас страницы ─────────────────────────────────────────── */
+
+.page {
+  min-height: 100vh;
+  background-color: var(--bg);
+}
+
+.container {
+  max-width: var(--container);
+  margin-inline: auto;
+  padding-inline: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .container {
+    padding-inline: var(--space-6);
+  }
+}
+
+@media (min-width: 1024px) {
+  .container {
+    padding-inline: var(--space-8);
+  }
+}
+
+/* Экран-заглушка: «Загрузка…», «Медиа не найдено» */
+.screen-message {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--bg);
+  color: var(--text);
+}
+
+.screen-message--dark {
+  background-color: var(--bg-cinema);
+}
+
+.app-header {
+  background-color: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Страницы деталей: шапка лежит поверх кадра, своя подложка ей мешает */
+.app-header--transparent {
+  background-color: transparent;
+  border-bottom-color: transparent;
+}
+
+.header__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding-block: var(--space-4);
+}
+
+/* На узком экране содержимое шапки переносится в несколько строк */
+@media (max-width: 639px) {
+  .header__inner {
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+}
+
+/* Фиксированный кадр под всей страницей деталей: остаётся на месте
+   при прокрутке описания или списка серий. */
+.detail-bg {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-behind);
+  overflow: hidden;
+}
+
+.detail-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(to bottom, var(--scrim-veil), var(--bg) 85%);
+}
+
+/* Панель поверх кадра: контент читается, кадр остаётся виден */
+.surface-glass {
+  border-radius: var(--radius-lg);
+  background-color: var(--surface-glass);
+  backdrop-filter: blur(var(--blur-glass));
+}
+
+/* Метка «продолжить с этого места». Отдельно от --focus-ring: это
+   состояние контента, а не фокуса, и оно видно в курсорном режиме,
+   где обводка фокуса погашена. */
+.marker-resume {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* Подпись только для скринридера (label над полем, у которого есть placeholder) */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  border: 0;
+  /* stylelint-disable-next-line declaration-property-value-allowed-list -- сдвиг
+     на пиксель, а не элемент шкалы отступов */
+  margin: -1px;
+  /* stylelint-disable-next-line property-no-deprecated -- clip-path не понимает
+     webOS 2020−, clip держит фолбэк */
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+}
+
+/* ── Кнопки ──────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background-color: var(--surface-2);
+  color: var(--text);
+  font-size: var(--text-base);
+  cursor: pointer;
+  transition: background-color var(--transition), opacity var(--transition);
+}
+
+.btn:hover {
+  background-color: var(--surface-3);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background-color: var(--accent-strong);
+  font-weight: var(--weight-semibold);
+}
+
+.btn--primary:hover {
+  background-color: var(--accent-strong-hover);
+}
+
+.btn--large {
+  padding: var(--space-3) var(--space-6);
+}
+
+.btn--block {
+  width: 100%;
+}
+
+/* Текстовая кнопка («← Назад к библиотеке») */
+.btn--plain {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--transition);
+}
+
+.btn--plain:hover {
+  background: none;
+  color: var(--text);
+}
+
+/* Кнопка возврата поверх фона-постера (как «← Назад» в плеере) */
+.btn--back {
+  margin-top: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border: none;
+  border-radius: var(--radius);
+  background-color: var(--scrim-subtle);
+  color: var(--text);
+  cursor: pointer;
+  transition: background-color var(--transition);
+}
+
+.btn--back:hover {
+  background-color: var(--scrim);
+}
+
+/* Кнопка-иконка (плеер) */
+.btn--icon {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text);
+  display: inline-flex;
+  cursor: pointer;
+  transition: color var(--transition);
+}
+
+.btn--icon:hover {
+  background: none;
+  color: var(--text-on-media);
+}
+
+/* ── Поля ввода ──────────────────────────────────────────────── */
+
+.input,
+.select {
+  width: 100%;
+  padding: var(--space-2) var(--space-4);
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.input::placeholder {
+  color: var(--text-muted);
+}
+
+.input:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.select {
+  width: auto;
+}
+
+/* ── Сообщения и метки ───────────────────────────────────────── */
+
+.alert {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  background-color: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger-text);
+}
+
+.text-error {
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.text-success {
+  color: var(--success);
+  font-size: var(--text-sm);
+}
+
+.badge {
+  display: inline-block;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+}
+
+.badge--success {
+  background-color: var(--success-bg);
+  color: var(--success);
+}
+
+/* ── Прогресс просмотра ──────────────────────────────────────── */
+
+.progress {
+  width: 100%;
+  height: 8px;
+  background-color: var(--surface-2);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.progress--thin {
+  height: 4px;
+}
+
+/* Полоса, приклеенная к низу постера: без скруглений и во всю ширину кадра */
+.progress--overlay {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 4px;
+  border-radius: 0;
+}
+
+.progress--overlay .progress__bar {
+  border-radius: 0;
+}
+
+.progress__bar {
+  height: 100%;
+  background-color: var(--accent);
+  border-radius: var(--radius-full);
+  transition: width var(--transition);
+}
+
+/* ── Сетка медиатеки ─────────────────────────────────────────── */
+
+.media-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .media-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 768px) {
+  .media-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .media-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+@media (min-width: 1280px) {
+  .media-grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+/* ── Постер-заглушка (плитка и страница деталей) ─────────────── */
+
+.poster {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius);
+}
+
+/* ── Hero страницы деталей ───────────────────────────────────
+   Кадр 16/9 во всю ширину, контент лежит поверх нижней трети
+   под градиентом в цвет фона.                                */
+
+.hero {
+  position: relative;
+  /* width обязателен: с одним aspect-ratio Firefox при упоре в max-height
+     сжимает блок по ширине вместо обрезки по высоте */
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 70vh;
+  overflow: hidden;
+}
+
+/* Экран сериала: кадр только как фон заголовка — основное место занимает список серий */
+.hero--compact {
+  aspect-ratio: auto;
+  height: 34vh;
+  min-height: 200px;
+}
+
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+    to top,
+    var(--bg) 2%,
+    var(--scrim-veil) 55%,
+    var(--scrim-haze)
+  );
+}
+
+.hero__content {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: var(--z-base);
+  padding-bottom: var(--space-8);
+}
+
+.hero__title {
+  margin-bottom: var(--space-2);
+  font-size: var(--text-4xl);
+  font-weight: var(--weight-bold);
+  text-shadow: var(--shadow-text);
+}
+
+.hero__meta {
+  margin-bottom: var(--space-6);
+  color: var(--text-muted);
+  font-size: var(--text-xl);
+}
+
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+/* ── Экраны входа / настройки сервера ────────────────────────
+   Общий каркас для Login и ServerSetup. Крупные размеры на
+   больших экранах — эти экраны читают с дивана на ТВ.        */
+
+.auth-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--space-4);
+  background-color: var(--bg);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 28rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.auth-title {
+  font-size: var(--text-3xl);
+  font-weight: var(--weight-extrabold);
+  text-align: center;
+}
+
+.auth-subtitle {
+  margin-top: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Поле ввода на экранах входа — крупнее обычного */
+.auth-input {
+  padding-block: var(--space-3);
+}
+
+.auth-submit {
+  width: 100%;
+  padding-block: var(--space-3);
+}
+
+@media (min-width: 1024px) {
+  .auth-card {
+    max-width: 42rem;
+    gap: var(--space-8);
+  }
+
+  .auth-title {
+    font-size: var(--text-6xl);
+  }
+
+  .auth-subtitle {
+    margin-top: var(--space-4);
+    font-size: var(--text-2xl);
+  }
+
+  .auth-form {
+    gap: var(--space-6);
+  }
+
+  .auth-input {
+    padding: var(--space-5) var(--space-6);
+    font-size: var(--text-2xl);
+  }
+
+  .auth-submit {
+    padding-block: var(--space-5);
+    font-size: var(--text-2xl);
+  }
+}

@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Rust
+target/
+# Cargo.lock нужен для воспроизводимых сборок, не игнорируем
+
+# Node
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend-react/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Логи и временные файлы
+*.log
+*.tmp
+*.db
+*.db-shm
+*.db-wal
+
+# Документация
+*.md
+!readme.md
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Переменные окружения
+.env
+.env.local
