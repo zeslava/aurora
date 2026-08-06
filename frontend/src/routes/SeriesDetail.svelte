@@ -151,6 +151,8 @@
       : []
   );
   let currentEpisodes = $derived(episodes?.seasons[selectedSeason.toString()] || []);
+  // Постер сезона есть не всегда — фоном тогда останется обложка сериала
+  let seasonPoster = $derived(episodes?.season_posters[selectedSeason.toString()] ?? null);
 
   // Досмотренный эпизод открывается с нуля, но полоса остаётся полной — так строка
   // читается однозначно: серия пройдена целиком
@@ -169,7 +171,13 @@
   <ScreenMessage text="Сериал не найден" />
 {:else}
   <div class="page">
-    <DetailBackdrop backdrop={media.backdrop} title={media.title} icon="📺" />
+    <DetailBackdrop
+      backdrop={seasonPoster}
+      fallback={media.backdrop}
+      title={media.title}
+      icon="📺"
+      objectPosition="center top"
+    />
 
     <AppHeader transparent>
       <button onclick={() => navigate('/library')} class="btn--back">← Назад к библиотеке</button>
