@@ -60,12 +60,17 @@ class Router {
 
   navigate(to: string, options: { replace?: boolean } = {}) {
     if (to === this.path) return;
-    if (!(isWatch(this.path) && isWatch(to))) this.previous = this.path;
+    // Переход между сериями внутри плеера не создаёт запись в истории:
+    // иначе Back из плеера возвращал бы на предыдущую серию, а не на
+    // экран, с которого плеер открыли
+    const withinWatch = isWatch(this.path) && isWatch(to);
+    if (!withinWatch) this.previous = this.path;
+    const replace = options.replace || withinWatch;
     if (useHash) {
       const url = `#${to}`;
-      if (options.replace) location.replace(url);
+      if (replace) location.replace(url);
       else location.hash = to;
-    } else if (options.replace) {
+    } else if (replace) {
       history.replaceState(null, '', to);
     } else {
       history.pushState(null, '', to);
