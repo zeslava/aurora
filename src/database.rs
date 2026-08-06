@@ -773,6 +773,51 @@ impl Database {
             .collect())
     }
 
+    /// Файлы, у которых `field_order` ещё не определён. NULL здесь означает «не пробовали»,
+    /// а не «прогрессивный»: ffprobe для прогрессива возвращает "progressive", и это значение
+    /// мы и пишем — иначе бэкфилл гонял бы ffprobe по одним и тем же файлам каждый старт.
+    pub async fn get_files_pending_field_order(&self, limit: i64) -> Result<Vec<(u64, PathBuf)>> {
+        let rows = sqlx::query(
+            "SELECT id, file_path FROM media_files
+             WHERE field_order IS NULL
+             ORDER BY id LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Не удалось получить файлы без field_order")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<i64, _>(0) as u64,
+                    PathBuf::from(row.get::<String, _>(1)),
+                )
+            })
+            .collect())
+    }
+
+    /// Проставляет `field_order` и сбрасывает кэш карт сегментов этого файла: если файл
+    /// оказался чересстрочным, его профиль меняется с copy на перекодирование, и старая
+    /// карта профилю больше не подходит.
+    pub async fn set_field_order(&self, file_id: u64, field_order: &str) -> Result<()> {
+        sqlx::query("UPDATE media_files SET field_order = ? WHERE id = ?")
+            .bind(field_order)
+            .bind(file_id as i64)
+            .execute(&self.pool)
+            .await
+            .context("Не удалось сохранить field_order")?;
+
+        sqlx::query("DELETE FROM media_file_segments WHERE file_id = ?")
+            .bind(file_id as i64)
+            .execute(&self.pool)
+            .await
+            .context("Не удалось сбросить карты сегментов")?;
+
+        Ok(())
+    }
+
     /// Сохраняет метаданные TMDB и отмечает элемент как синхронизированный
     pub async fn update_tmdb_metadata(
         &self,

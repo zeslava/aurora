@@ -753,7 +753,61 @@ async fn perform_scan(state: &AppState, job_id: Option<Uuid>) -> Result<u64, Str
 
 /// Публичная точка входа для догрузки метаданных при старте сервера
 pub async fn enrich_pending_metadata(state: &AppState) {
+    backfill_field_order(state).await;
     enrich_tmdb(state).await;
+}
+
+/// Дозаполняет `field_order` у файлов, попавших в БД до появления этого признака.
+///
+/// Отдельная задача, а не часть скана: `insert_file_if_new` пропускает уже известные файлы,
+/// поэтому повторное сканирование метаданные не перечитывает и признак остался бы пустым.
+/// Работает пачками и переживает перезапуск: NULL означает «не пробовали», и после успешной
+/// пробы там всегда что-то есть — в том числе "unknown", чтобы не гонять ffprobe по одному
+/// и тому же файлу каждый старт.
+async fn backfill_field_order(state: &AppState) -> u64 {
+    let mut filled = 0u64;
+
+    loop {
+        let pending = match state.db.get_files_pending_field_order(50).await {
+            Ok(files) if files.is_empty() => break,
+            Ok(files) => files,
+            Err(e) => {
+                tracing::warn!("Не удалось получить очередь field_order: {}", e);
+                break;
+            }
+        };
+
+        for (file_id, path) in pending {
+            // ffprobe — блокирующий вызов, в рантайме tokio ему не место.
+            let probed = tokio::task::spawn_blocking(move || extract_metadata(&path)).await;
+
+            let order = match probed {
+                Ok(Ok(meta)) => meta.field_order.unwrap_or_else(|| "unknown".to_string()),
+                // Файл мог исчезнуть или оказаться битым. Помечаем, чтобы очередь двигалась:
+                // иначе один нечитаемый файл крутил бы бэкфилл вечно.
+                Ok(Err(e)) => {
+                    tracing::warn!("field_order для файла {}: {}", file_id, e);
+                    "unknown".to_string()
+                }
+                Err(e) => {
+                    tracing::warn!("Задача ffprobe для файла {} упала: {}", file_id, e);
+                    "unknown".to_string()
+                }
+            };
+
+            if let Err(e) = state.db.set_field_order(file_id, &order).await {
+                tracing::warn!("Не удалось сохранить field_order файла {}: {}", file_id, e);
+                // Запись осталась NULL — следующий батч выберет её снова и уйдёт в петлю.
+                return filled;
+            }
+            filled += 1;
+        }
+    }
+
+    if filled > 0 {
+        tracing::info!("field_order: определён у {} файлов", filled);
+    }
+    filled
 }
 
 /// Догружает метаданные TMDB для элементов, которых ещё не касались.
@@ -1941,6 +1995,38 @@ mod tests {
             &Some("yuv420p".to_string()),
             &None
         ));
+    }
+
+    /// Регрессия: файлы, попавшие в БД до появления признака, остаются с NULL навсегда —
+    /// `insert_file_if_new` пропускает известные файлы, поэтому ре-скан их не чинит.
+    #[tokio::test]
+    async fn backfill_fills_field_order_for_existing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shape = crate::testkit::Shape {
+            name: "backfill_interlaced",
+            video: crate::testkit::VideoForm::H264Interlaced,
+            audio: crate::testkit::AudioForm::Mp2,
+            timestamps: crate::testkit::TimestampForm::Clean,
+            gop: crate::testkit::GopForm::Uniform,
+            seconds: 8,
+        };
+        let file = shape.build(tmp.path());
+
+        // Так выглядит запись, сделанная до миграции 008.
+        let (state, _) = state_with_field_order(&file, "h264", "mp2", 8, None).await;
+
+        let filled = backfill_field_order(&state).await;
+        assert_eq!(filled, 1, "бэкфилл должен был обработать один файл");
+
+        let order: Option<String> =
+            sqlx::query_scalar("SELECT field_order FROM media_files LIMIT 1")
+                .fetch_one(&state.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(order.as_deref(), Some("tt"));
+
+        // Второй проход не должен находить работу — иначе ffprobe гонялся бы каждый старт.
+        assert_eq!(backfill_field_order(&state).await, 0);
     }
 
     /// Чересстрочный H.264 проходит белый список кодеков и без этой проверки уходил бы
