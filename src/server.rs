@@ -1084,6 +1084,7 @@ async fn insert_file_if_new(state: &AppState, file_path: &PathBuf) -> Option<u64
         audio_codec: None,
         video_bitrate: None,
         pix_fmt: None,
+        field_order: None,
     };
 
     match extract_metadata(file_path) {
@@ -1094,6 +1095,7 @@ async fn insert_file_if_new(state: &AppState, file_path: &PathBuf) -> Option<u64
             file.audio_codec = metadata.audio_codec;
             file.video_bitrate = metadata.video_bitrate;
             file.pix_fmt = metadata.pix_fmt;
+            file.field_order = metadata.field_order;
         }
         Err(e) => tracing::warn!("Не удалось извлечь метаданные для {:?}: {}", file_path, e),
     }
@@ -1411,7 +1413,11 @@ fn needs_audio_transcoding(audio_codec: &Option<String>) -> bool {
 }
 
 /// Браузер (в т.ч. webOS) играет из fMP4 только H.264 8-bit — остальное перекодируем.
-fn needs_video_transcoding(video_codec: &Option<String>, pix_fmt: &Option<String>) -> bool {
+fn needs_video_transcoding(
+    video_codec: &Option<String>,
+    pix_fmt: &Option<String>,
+    field_order: &Option<String>,
+) -> bool {
     let codec_needs_transcode = video_codec
         .as_ref()
         .map(|codec| {
@@ -1427,7 +1433,21 @@ fn needs_video_transcoding(video_codec: &Option<String>, pix_fmt: &Option<String
         .map(|fmt| fmt.to_lowercase().contains("10le") || fmt.to_lowercase().contains("10be"))
         .unwrap_or(false);
 
-    codec_needs_transcode || is_10bit
+    codec_needs_transcode || is_10bit || is_interlaced(field_order)
+}
+
+/// Чересстрочный источник. ffprobe отдаёт "progressive" для прогрессивного, "tt"/"bb"/"tb"/"bt"
+/// для полей и "unknown", когда определить не смог. Неизвестное считаем прогрессивным: иначе
+/// перекодировали бы всю библиотеку из-за отсутствующих метаданных.
+///
+/// Почему это вообще решает copy|transcode: чересстрочный H.264 проходит белый список кодеков
+/// и уходит в `-c:v copy`, но MSE поля не декодирует — картинка идёт рывками при копеечном
+/// битрейте. Замер: DVB-рип 720x576 tt, 3.6 Mbit/s. См. docs/decisions/0005.
+fn is_interlaced(field_order: &Option<String>) -> bool {
+    field_order
+        .as_ref()
+        .map(|f| matches!(f.to_lowercase().as_str(), "tt" | "bb" | "tb" | "bt"))
+        .unwrap_or(false)
 }
 
 /// Достаёт карту сегментов из кэша БД. Карта, не подходящая профилю (например, сохранённая
@@ -1474,8 +1494,13 @@ async fn segment_map_for(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut profile = StreamProfile {
-        transcode_video: needs_video_transcoding(&media_file.video_codec, &media_file.pix_fmt),
+        transcode_video: needs_video_transcoding(
+            &media_file.video_codec,
+            &media_file.pix_fmt,
+            &media_file.field_order,
+        ),
         transcode_audio: needs_audio_transcoding(&media_file.audio_codec),
+        deinterlace: is_interlaced(&media_file.field_order),
     };
 
     if let Some(map) = cached_segment_map(state, media_file.id, profile).await? {
@@ -1872,7 +1897,8 @@ mod tests {
     fn hevc_needs_video_transcoding() {
         assert!(needs_video_transcoding(
             &Some("hevc".to_string()),
-            &Some("yuv420p".to_string())
+            &Some("yuv420p".to_string()),
+            &None
         ));
     }
 
@@ -1880,7 +1906,8 @@ mod tests {
     fn vp9_needs_video_transcoding() {
         assert!(needs_video_transcoding(
             &Some("vp9".to_string()),
-            &Some("yuv420p".to_string())
+            &Some("yuv420p".to_string()),
+            &None
         ));
     }
 
@@ -1888,7 +1915,8 @@ mod tests {
     fn ten_bit_needs_video_transcoding() {
         assert!(needs_video_transcoding(
             &Some("h264".to_string()),
-            &Some("yuv420p10le".to_string())
+            &Some("yuv420p10le".to_string()),
+            &None
         ));
     }
 
@@ -1896,21 +1924,51 @@ mod tests {
     fn h264_8bit_does_not_need_video_transcoding() {
         assert!(!needs_video_transcoding(
             &Some("h264".to_string()),
-            &Some("yuv420p".to_string())
+            &Some("yuv420p".to_string()),
+            &None
         ));
     }
 
     #[test]
     fn unknown_codec_and_pix_fmt_does_not_need_video_transcoding() {
-        assert!(!needs_video_transcoding(&None, &None));
+        assert!(!needs_video_transcoding(&None, &None, &None));
     }
 
     #[test]
     fn mpeg4_needs_video_transcoding() {
         assert!(needs_video_transcoding(
             &Some("mpeg4".to_string()),
-            &Some("yuv420p".to_string())
+            &Some("yuv420p".to_string()),
+            &None
         ));
+    }
+
+    /// Чересстрочный H.264 проходит белый список кодеков и без этой проверки уходил бы
+    /// в `-c:v copy` — MSE поля не декодирует, отсюда рывки при копеечном битрейте.
+    #[test]
+    fn interlaced_h264_needs_video_transcoding() {
+        for order in ["tt", "bb", "tb", "bt"] {
+            assert!(
+                needs_video_transcoding(
+                    &Some("h264".to_string()),
+                    &Some("yuv420p".to_string()),
+                    &Some(order.to_string())
+                ),
+                "field_order={order} должен требовать перекодирования"
+            );
+        }
+    }
+
+    /// "unknown" и отсутствие метаданных — не повод жечь CPU на всей библиотеке.
+    #[test]
+    fn progressive_and_unknown_field_order_stay_in_copy() {
+        for order in [None, Some("progressive"), Some("unknown")] {
+            assert!(!needs_video_transcoding(
+                &Some("h264".to_string()),
+                &Some("yuv420p".to_string()),
+                &order.map(|o| o.to_string())
+            ));
+        }
     }
 
     #[test]
@@ -2104,6 +2162,16 @@ mod tests {
         audio_codec: &str,
         duration: u64,
     ) -> (AppState, String) {
+        state_with_field_order(file_path, video_codec, audio_codec, duration, None).await
+    }
+
+    async fn state_with_field_order(
+        file_path: &std::path::Path,
+        video_codec: &str,
+        audio_codec: &str,
+        duration: u64,
+        field_order: Option<&str>,
+    ) -> (AppState, String) {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -2133,6 +2201,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/008_add_field_order.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         let db = crate::database::Database { pool };
 
         let file_id = db
@@ -2145,6 +2217,7 @@ mod tests {
                 audio_codec: Some(audio_codec.into()),
                 video_bitrate: None,
                 pix_fmt: Some("yuv420p".into()),
+                field_order: field_order.map(|f| f.to_string()),
             })
             .await
             .unwrap();
@@ -2492,14 +2565,18 @@ mod tests {
         shape: &crate::testkit::Shape,
     ) -> (AppState, String) {
         let video_codec = match shape.video {
-            crate::testkit::VideoForm::H264 => "h264",
+            crate::testkit::VideoForm::H264 | crate::testkit::VideoForm::H264Interlaced => "h264",
             crate::testkit::VideoForm::Mpeg4 => "mpeg4",
         };
-        state_with_codecs(
+        // field_order берём из самого файла, а не из формы: так тест ловит и случай,
+        // когда сканер перестал класть признак в БД.
+        let field_order = crate::testkit::probe_field_order(file_path);
+        state_with_field_order(
             file_path,
             video_codec,
             shape.audio.probed_name(),
             shape.seconds as u64,
+            Some(field_order.as_str()).filter(|f| !f.is_empty()),
         )
         .await
     }

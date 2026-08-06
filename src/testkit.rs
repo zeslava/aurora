@@ -15,6 +15,7 @@
 //! | Breaking Bad (LostFilm 1080p) | mkv | h264 | 2 пакета с `dts=N/A` | рваный, 1.2–10.4 c |
 //! | Gossip Girl (WEB-DL 720p) | mkv | h264 | 1 пакет с `dts=N/A` | частый, 0.04–1.0 c |
 //! | Scooby Doo (DVDRip) | avi | mpeg4 | `pts` нет вовсе | рваный, 0.9–10.4 c |
+//! | ВОСЬМИДЕСЯТЫЕ (DVB) | ts | h264 **tt** | чистые | ровный, 1.17 c |
 
 #![cfg(test)]
 
@@ -53,6 +54,10 @@ pub enum VideoForm {
     H264,
     /// В MSE не декодируется — принудительное перекодирование видео, другая ветка нарезки.
     Mpeg4,
+    /// Чересстрочный H.264 в MPEG-TS: кодек браузерный, но поля MSE не декодирует.
+    /// Ось всплыла на DVB-рипе 720x576 tt — он проходил белый список кодеков и уходил
+    /// в `-c:v copy`, давая рывки при 3.6 Mbit/s.
+    H264Interlaced,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +66,8 @@ pub enum AudioForm {
     Aac,
     Ac3,
     Mp3,
+    /// MPEG-1 Layer II — звук эфирного DVB. Ни один браузер его не играет.
+    Mp2,
 }
 
 impl AudioForm {
@@ -69,6 +76,7 @@ impl AudioForm {
             AudioForm::Aac => "aac",
             AudioForm::Ac3 => "ac3",
             AudioForm::Mp3 => "libmp3lame",
+            AudioForm::Mp2 => "mp2",
         }
     }
 
@@ -78,6 +86,7 @@ impl AudioForm {
             AudioForm::Aac => "aac",
             AudioForm::Ac3 => "ac3",
             AudioForm::Mp3 => "mp3",
+            AudioForm::Mp2 => "mp2",
         }
     }
 }
@@ -95,10 +104,12 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// Контейнер выводится из формы таймстемпов: `NoPts` бывает только у avi.
+    /// Контейнер выводится из формы источника: `NoPts` бывает только у avi, чересстрочный
+    /// H.264 в библиотеке встречается только в эфирном MPEG-TS.
     pub fn extension(&self) -> &'static str {
-        match self.timestamps {
-            TimestampForm::NoPts => "avi",
+        match (self.video, self.timestamps) {
+            (VideoForm::H264Interlaced, _) => "ts",
+            (_, TimestampForm::NoPts) => "avi",
             _ => "mkv",
         }
     }
@@ -171,6 +182,15 @@ impl Shape {
                     }
                 }
             }
+            VideoForm::H264Interlaced => {
+                // interlace собирает кадр из двух соседних, поэтому вход берём вдвое
+                // быстрее — иначе итоговая частота уедет с 25 на 12.5.
+                cmd.args(["-vf", "interlace=scan=tff"]);
+                cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+                // Без этих флагов x264 закодирует поля как обычные кадры, и ffprobe
+                // покажет progressive — форма выродится.
+                cmd.args(["-flags", "+ilme+ildct", "-top", "1", "-bf", "0"]);
+            }
             VideoForm::Mpeg4 => {
                 // Без B-кадров avi-мукссер проставляет pts всем пакетам, и форма `NoPts`
                 // вырождается в `Clean`.
@@ -225,6 +245,17 @@ impl Shape {
                 "{}: ожидался контейнер без pts, а pts есть",
                 self.name
             ),
+        }
+
+        // Чересстрочность — главное свойство этой оси: если ffmpeg соберёт прогрессивный
+        // файл, тест на deinterlace останется зелёным, ничего не проверяя.
+        if self.video == VideoForm::H264Interlaced {
+            let order = probe_field_order(path);
+            assert!(
+                matches!(order.as_str(), "tt" | "bb" | "tb" | "bt"),
+                "{}: ожидался чересстрочный источник, ffprobe говорит field_order={order}",
+                self.name
+            );
         }
 
         let keys: Vec<f64> = packets
@@ -297,6 +328,16 @@ impl Shape {
                 gop: GopForm::Ragged,
                 seconds: 30,
             },
+            // ВОСЬМИДЕСЯТЫЕ (DVB): чересстрочный h264 + mp2 в MPEG-TS. Кодек браузерный,
+            // поэтому до появления проверки field_order файл уходил в `-c:v copy`.
+            Shape {
+                name: "dvb_h264i_mp2",
+                video: VideoForm::H264Interlaced,
+                audio: AudioForm::Mp2,
+                timestamps: TimestampForm::Clean,
+                gop: GopForm::Uniform,
+                seconds: 30,
+            },
             // Аудио уже браузерное при неудобном видео: единственная комбинация, где
             // перекодируется видео, но не звук.
             Shape {
@@ -325,6 +366,31 @@ impl Packet {
     pub fn time(&self) -> Option<f64> {
         self.dts.or(self.pts)
     }
+}
+
+/// `field_order` первого видеопотока. Пустая строка, если ffprobe его не назвал.
+pub fn probe_field_order(path: &Path) -> String {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=field_order",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .expect("не удалось запустить ffprobe");
+    // У MPEG-TS ffprobe печатает поток дважды — в секции programs и в streams.
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 pub fn probe_packets(path: &Path) -> Vec<Packet> {

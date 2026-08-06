@@ -208,6 +208,10 @@ pub struct HlsEncodeRun<'a> {
     pub start_time: f64,
     pub start_index: usize,
     pub transcode_audio: bool,
+    /// Собрать кадры из полей чересстрочного источника. `mode=0` даёт кадр на пару полей
+    /// (25 fps из 25 кадров), а не удвоение частоты: материал SD-эфира, платить вдвое
+    /// большим декодом на телевизоре за это не стоит.
+    pub deinterlace: bool,
     pub segment_seconds: f64,
     pub init_name: &'a str,
 }
@@ -222,6 +226,10 @@ impl HlsEncodeRun<'_> {
         push(&mut args, "-map", "0:v:0");
         push(&mut args, "-map", "0:a:0");
 
+        // Фильтр идёт до кодека: yadif работает над декодированными кадрами.
+        if self.deinterlace {
+            push(&mut args, "-vf", "yadif=mode=0");
+        }
         push(&mut args, "-c:v", "libx264");
         push(&mut args, "-preset", "veryfast");
         push(&mut args, "-crf", "23");
@@ -404,6 +412,48 @@ mod tests {
         assert_eq!(args[index_of(&args, "-t") + 1], "6.000000");
     }
 
+    /// Порядок значим: -vf относится к декодированному входу и обязан стоять до -c:v,
+    /// иначе фильтр применится не к тому этапу и yadif молча не сработает.
+    #[test]
+    fn deinterlace_adds_yadif_before_encoder() {
+        let args = strs(
+            &HlsEncodeRun {
+                input: Path::new("/m/f.ts"),
+                dir: Path::new("/tmp/c"),
+                start_time: 0.0,
+                start_index: 0,
+                transcode_audio: true,
+                deinterlace: true,
+                segment_seconds: 6.0,
+                init_name: "init.0.tmp.mp4",
+            }
+            .to_args(),
+        );
+
+        assert_eq!(args[index_of(&args, "-vf") + 1], "yadif=mode=0");
+        assert!(index_of(&args, "-vf") < index_of(&args, "-c:v"));
+    }
+
+    /// Прогрессивный источник не должен платить за фильтр.
+    #[test]
+    fn progressive_run_has_no_filter() {
+        let args = strs(
+            &HlsEncodeRun {
+                input: Path::new("/m/f.mkv"),
+                dir: Path::new("/tmp/c"),
+                start_time: 0.0,
+                start_index: 0,
+                transcode_audio: true,
+                deinterlace: false,
+                segment_seconds: 6.0,
+                init_name: "init.0.tmp.mp4",
+            }
+            .to_args(),
+        );
+
+        assert!(!args.contains(&"-vf".to_string()));
+    }
+
     #[test]
     fn encode_run_keeps_absolute_timestamps() {
         let args = strs(
@@ -413,6 +463,7 @@ mod tests {
                 start_time: 60.0,
                 start_index: 10,
                 transcode_audio: true,
+                deinterlace: false,
                 segment_seconds: 6.0,
                 init_name: "init.10.tmp.mp4",
             }
@@ -443,6 +494,7 @@ mod tests {
                 start_time: 0.0,
                 start_index: 0,
                 transcode_audio: false,
+                deinterlace: false,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
             }
@@ -471,6 +523,7 @@ mod tests {
                 start_time: 0.0,
                 start_index: 0,
                 transcode_audio: true,
+                deinterlace: false,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
             }

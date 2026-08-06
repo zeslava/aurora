@@ -507,6 +507,7 @@ async fn spawn_run(
             start_time,
             start_index,
             transcode_audio: profile.transcode_audio,
+            deinterlace: profile.deinterlace,
             segment_seconds: segments::GRID_SEGMENT_SECONDS,
             init_name: &init_name,
         }

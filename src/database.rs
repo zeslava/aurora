@@ -144,8 +144,8 @@ impl Database {
     /// Вставляет физический файл, возвращает его id
     pub async fn insert_media_file(&self, file: &MediaFile) -> Result<u64> {
         let result = sqlx::query(
-            "INSERT INTO media_files (file_path, duration, resolution, video_codec, audio_codec, video_bitrate, pix_fmt)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO media_files (file_path, duration, resolution, video_codec, audio_codec, video_bitrate, pix_fmt, field_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING id",
         )
         .bind(file.file_path.to_string_lossy().as_ref())
@@ -155,6 +155,7 @@ impl Database {
         .bind(&file.audio_codec)
         .bind(file.video_bitrate.map(|b| b as i64))
         .bind(&file.pix_fmt)
+        .bind(&file.field_order)
         .fetch_one(&self.pool)
         .await
         .context("Не удалось вставить медиафайл")?;
@@ -982,13 +983,15 @@ fn row_to_media_file(row: sqlx::sqlite::SqliteRow) -> MediaFile {
         audio_codec: row.get::<Option<String>, _>(5),
         video_bitrate: row.get::<Option<i64>, _>(6).map(|b| b as u64),
         pix_fmt: row.get::<Option<String>, _>(7),
+        field_order: row.get::<Option<String>, _>(8),
     }
 }
 
 /// Общая часть SELECT'а для полей файла — порядок колонок фиксирован и разбирается
 /// в `row_to_file_info` начиная с `offset`.
 const FILE_COLUMNS: &str = "mf.id, mf.file_path, mf.duration, mf.resolution, \
-                            mf.video_codec, mf.audio_codec, mf.video_bitrate, mf.pix_fmt";
+                            mf.video_codec, mf.audio_codec, mf.video_bitrate, mf.pix_fmt, \
+                            mf.field_order";
 
 /// Колонки метаданных TMDB — идут в SELECT'ах сразу после `FILE_COLUMNS`
 /// и разбираются в `row_to_tmdb_info`.
@@ -1020,7 +1023,7 @@ fn row_to_tmdb_info(row: &sqlx::sqlite::SqliteRow, offset: usize, media_id: &str
     }
 }
 
-/// Разбирает 8 колонок файла (`FILE_COLUMNS`), начиная с `offset`.
+/// Разбирает 9 колонок файла (`FILE_COLUMNS`), начиная с `offset`.
 /// Колонка `mf.id` (по смещению `offset`) не нужна наружу и пропускается.
 fn row_to_file_info(row: &sqlx::sqlite::SqliteRow, offset: usize) -> MediaFileInfo {
     MediaFileInfo {
@@ -1034,11 +1037,12 @@ fn row_to_file_info(row: &sqlx::sqlite::SqliteRow, offset: usize) -> MediaFileIn
         audio_codec: row.get::<Option<String>, _>(offset + 5),
         video_bitrate: row.get::<Option<i64>, _>(offset + 6).map(|b| b as u64),
         pix_fmt: row.get::<Option<String>, _>(offset + 7),
+        field_order: row.get::<Option<String>, _>(offset + 8),
     }
 }
 
 /// Ожидает колонки: id, library_id, title, year, media_type, created_at,
-/// затем `FILE_COLUMNS` (8 колонок), `TMDB_COLUMNS` (5 колонок) и custom_title
+/// затем `FILE_COLUMNS` (9 колонок), `TMDB_COLUMNS` (5 колонок) и custom_title
 fn row_to_media_item(row: sqlx::sqlite::SqliteRow) -> MediaItem {
     let media_type = match row.get::<String, _>(4).as_str() {
         "tv" => MediaType::TvSeries,
@@ -1047,11 +1051,11 @@ fn row_to_media_item(row: sqlx::sqlite::SqliteRow) -> MediaItem {
     let id = row.get::<String, _>(0);
 
     MediaItem {
-        tmdb: row_to_tmdb_info(&row, 14, &id),
+        tmdb: row_to_tmdb_info(&row, 15, &id),
         id,
         library_id: row.get::<Option<i64>, _>(1).map(|id| id as u64),
         title: row.get::<String, _>(2),
-        custom_title: row.get::<Option<String>, _>(19),
+        custom_title: row.get::<Option<String>, _>(20),
         year: row.get::<Option<i64>, _>(3).map(|y| y as u32),
         media_type,
         created_at: parse_created_at(row.get::<Option<String>, _>(5)),
@@ -1095,6 +1099,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/008_add_field_order.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         Database { pool }
     }
@@ -1109,6 +1117,7 @@ mod tests {
             audio_codec: None,
             video_bitrate: None,
             pix_fmt: None,
+            field_order: None,
         })
         .await
         .unwrap()

@@ -44,49 +44,56 @@ fn parse_ffprobe_output(json: &Value) -> Result<MediaMetadata> {
     }
 
     // Извлекаем данные из видео потока
-    let (width, height, video_codec, video_bitrate, pix_fmt) = if let Some(video) = video_stream {
-        let w = video
-            .get("width")
-            .and_then(|w| w.as_u64())
-            .or_else(|| {
-                video
-                    .get("width")
-                    .and_then(|w| w.as_str())
-                    .and_then(|w| w.parse::<u64>().ok())
-            })
-            .map(|w| w as u32);
+    let (width, height, video_codec, video_bitrate, pix_fmt, field_order) =
+        if let Some(video) = video_stream {
+            let w = video
+                .get("width")
+                .and_then(|w| w.as_u64())
+                .or_else(|| {
+                    video
+                        .get("width")
+                        .and_then(|w| w.as_str())
+                        .and_then(|w| w.parse::<u64>().ok())
+                })
+                .map(|w| w as u32);
 
-        let h = video
-            .get("height")
-            .and_then(|h| h.as_u64())
-            .or_else(|| {
-                video
-                    .get("height")
-                    .and_then(|h| h.as_str())
-                    .and_then(|h| h.parse::<u64>().ok())
-            })
-            .map(|h| h as u32);
+            let h = video
+                .get("height")
+                .and_then(|h| h.as_u64())
+                .or_else(|| {
+                    video
+                        .get("height")
+                        .and_then(|h| h.as_str())
+                        .and_then(|h| h.parse::<u64>().ok())
+                })
+                .map(|h| h as u32);
 
-        let codec = video
-            .get("codec_name")
-            .and_then(|c| c.as_str())
-            .map(|s| s.to_string());
+            let codec = video
+                .get("codec_name")
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string());
 
-        let bitrate = video
-            .get("bit_rate")
-            .and_then(|b| b.as_str())
-            .and_then(|b| b.parse::<u64>().ok())
-            .or_else(|| video.get("bit_rate").and_then(|b| b.as_u64()));
+            let bitrate = video
+                .get("bit_rate")
+                .and_then(|b| b.as_str())
+                .and_then(|b| b.parse::<u64>().ok())
+                .or_else(|| video.get("bit_rate").and_then(|b| b.as_u64()));
 
-        let pix_fmt = video
-            .get("pix_fmt")
-            .and_then(|p| p.as_str())
-            .map(|s| s.to_string());
+            let pix_fmt = video
+                .get("pix_fmt")
+                .and_then(|p| p.as_str())
+                .map(|s| s.to_string());
 
-        (w, h, codec, bitrate, pix_fmt)
-    } else {
-        (None, None, None, None, None)
-    };
+            // ffprobe отдаёт "progressive" | "tt" | "bb" | "tb" | "bt" | "unknown".
+            let field_order = video
+                .get("field_order")
+                .and_then(|f| f.as_str())
+                .map(|s| s.to_string());
+
+            (w, h, codec, bitrate, pix_fmt, field_order)
+        } else {
+            (None, None, None, None, None, None)
+        };
 
     // Извлекаем аудио кодек
     let audio_codec = audio_stream
@@ -111,5 +118,6 @@ fn parse_ffprobe_output(json: &Value) -> Result<MediaMetadata> {
         audio_codec,
         video_bitrate,
         pix_fmt,
+        field_order,
     })
 }

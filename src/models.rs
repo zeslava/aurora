@@ -31,6 +31,8 @@ pub struct MediaFile {
     pub video_bitrate: Option<u64>,
     /// Пиксельный формат видео (например, "yuv420p", "yuv420p10le")
     pub pix_fmt: Option<String>,
+    /// Порядок полей развёртки: "progressive" | "tt" | "bb" | "tb" | "bt"
+    pub field_order: Option<String>,
 }
 
 /// Технические характеристики воспроизводимой сущности — общая часть фильма и
@@ -52,6 +54,8 @@ pub struct MediaFileInfo {
     pub video_bitrate: Option<u64>,
     /// Пиксельный формат видео
     pub pix_fmt: Option<String>,
+    /// Порядок полей развёртки
+    pub field_order: Option<String>,
 }
 
 /// Медиа элемент — контейнер: фильм или сериал.
@@ -133,6 +137,8 @@ pub struct MediaMetadata {
     pub video_bitrate: Option<u64>,
     /// Пиксельный формат видео (например, "yuv420p", "yuv420p10le")
     pub pix_fmt: Option<String>,
+    /// Порядок полей развёртки: "progressive" | "tt" | "bb" | "tb" | "bt"
+    pub field_order: Option<String>,
 }
 
 impl MediaMetadata {

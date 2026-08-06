@@ -30,10 +30,16 @@ const MIN_TAIL_SECONDS: f64 = 1.0;
 pub struct StreamProfile {
     pub transcode_video: bool,
     pub transcode_audio: bool,
+    /// Источник чересстрочный — видео надо не просто перекодировать, а сначала собрать
+    /// кадры из полей. Всегда вместе с `transcode_video`: класть поля в fMP4 через
+    /// `-c:v copy` нельзя, MSE их не декодирует.
+    pub deinterlace: bool,
 }
 
 impl StreamProfile {
     /// Стабильный строковый ключ профиля — часть имени каталога кэша и первичного ключа в БД.
+    /// Деинтерлейс в ключ не входит: он не меняет границы сегментов, а для конкретного
+    /// файла постоянен — карта в profile "v"/"av" одинакова с ним и без него.
     pub fn key(&self) -> &'static str {
         match (self.transcode_video, self.transcode_audio) {
             (false, false) => "copy",
@@ -399,10 +405,12 @@ mod tests {
     const FMP4: StreamProfile = StreamProfile {
         transcode_video: true,
         transcode_audio: true,
+        deinterlace: false,
     };
     const TS: StreamProfile = StreamProfile {
         transcode_video: false,
         transcode_audio: true,
+        deinterlace: false,
     };
 
     #[test]
@@ -488,6 +496,7 @@ mod tests {
                 StreamProfile {
                     transcode_video: v,
                     transcode_audio: a,
+                    deinterlace: false,
                 }
                 .key()
             })

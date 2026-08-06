@@ -13,3 +13,4 @@
 - [0002 — Вызовы ffmpeg за одним модулем](0002-ffmpeg-port.md)
 - [0003 — Фикстура задаётся осями формы источника](0003-source-shape-matrix.md)
 - [0004 — Слои дизайн-системы и режимы ввода](0004-design-system-layers.md)
+- [0005 — Чересстрочный источник не может идти через `-c:v copy`](0005-interlaced-source-forces-transcode.md)
