@@ -173,6 +173,10 @@ struct FileCache {
     dir: PathBuf,
     profile: segments::StreamProfile,
     runs: Vec<Run>,
+    /// Задача, готовящая `init.mp4`. Живёт отдельно от `runs`: init-ран пишет в свой
+    /// каталог и сегментов в кэше не оставляет, поэтому `run_covering` не должен его
+    /// находить — иначе запрос сегмента ждал бы ран, который ему ничего не напишет.
+    init: Option<Arc<StdMutex<Option<String>>>>,
     last_access: Instant,
 }
 
@@ -239,6 +243,12 @@ impl HlsManager {
         Self::with_root(std::env::temp_dir())
     }
 
+    /// Корень файлового кэша — нужен тестам, чтобы заглянуть, что ран реально записал.
+    #[cfg(test)]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn with_root(root: PathBuf) -> Self {
         Self {
             caches: Arc::new(AsyncMutex::new(HashMap::new())),
@@ -264,6 +274,7 @@ impl HlsManager {
                     dir,
                     profile,
                     runs: Vec::new(),
+                    init: None,
                     last_access: Instant::now(),
                 }))
             })
@@ -338,13 +349,35 @@ impl HlsManager {
 
             guard.runs.retain(|r| !r.task.is_finished());
 
-            let covering = if is_init {
-                (!guard.runs.is_empty()).then_some(0)
-            } else {
-                guard.run_covering(index)
-            };
+            // init готовится отдельной короткой задачей, а не полноразмерным раном:
+            // раньше запрос init при пустом кэше запускал ffmpeg с нулевого сегмента,
+            // и при старте с середины файла машина параллельно перекодировала весь фильм
+            // с начала — работу, которую никто не смотрит (замер: ран с 0 дошёл до
+            // сегмента 205, пока зритель смотрел со 104-го).
+            if is_init {
+                if let Some(failed) = guard.init.clone() {
+                    info!("HLS {what}: miss, ждём init-задачу");
+                    failed
+                } else {
+                    info!("HLS {what}: miss, новая init-задача");
+                    let failed = Arc::new(StdMutex::new(None));
+                    let failed_for_task = failed.clone();
+                    let dir = guard.dir.clone();
+                    let file_path = file_path.to_path_buf();
 
-            if let Some(run_pos) = covering {
+                    let task = tokio::spawn(async move {
+                        if let Err(e) = spawn_init_run(&file_path, &dir, profile).await {
+                            error!("Ошибка init-рана HLS: {e}");
+                            *failed_for_task.lock().unwrap() = Some(e.to_string());
+                        }
+                    });
+                    // Хендл не храним: задача короткая и самозавершающаяся, а её падение
+                    // видно через `failed`.
+                    drop(task);
+                    guard.init = Some(failed.clone());
+                    failed
+                }
+            } else if let Some(run_pos) = guard.run_covering(index) {
                 let r = &guard.runs[run_pos];
                 let start = r.start_index;
                 info!(
@@ -363,7 +396,7 @@ impl HlsManager {
                     oldest.task.abort();
                 }
 
-                let start_index = if is_init { 0 } else { index };
+                let start_index = index;
                 info!("HLS {what}: miss, новый ран start={start_index} (живые {existing:?})");
                 let failed = Arc::new(StdMutex::new(None));
                 let failed_for_task = failed.clone();
@@ -508,6 +541,7 @@ async fn spawn_run(
             start_index,
             transcode_audio: profile.transcode_audio,
             deinterlace: profile.deinterlace,
+            max_seconds: None,
             segment_seconds: segments::GRID_SEGMENT_SECONDS,
             init_name: &init_name,
         }
@@ -542,6 +576,83 @@ async fn spawn_run(
     if !status.success() {
         anyhow::bail!("ffmpeg завершился с кодом {:?}", status.code());
     }
+    Ok(())
+}
+
+/// Готовит только `init.mp4` — заголовок fMP4 с параметрами кодека.
+///
+/// Пишет в собственный подкаталог и копирует наружу единственный файл. Каталог отдельный,
+/// потому что ран, ограниченный `-t`, оставляет после себя обрезанный `segment00000.m4s`:
+/// попади он в кэш, зритель получил бы вместо шестисекундного сегмента односекундный.
+///
+/// init зависит только от настроек кодировщика, а не от позиции, поэтому его можно готовить
+/// раном с начала файла независимо от того, откуда начнётся просмотр.
+async fn spawn_init_run(
+    file_path: &Path,
+    dir: &Path,
+    profile: segments::StreamProfile,
+) -> Result<()> {
+    let final_path = dir.join("init.mp4");
+    if final_path.exists() {
+        return Ok(());
+    }
+
+    let scratch = dir.join("init-scratch");
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    tokio::fs::create_dir_all(&scratch)
+        .await
+        .context("Не удалось создать каталог для init-рана")?;
+
+    let init_name = "init.mp4";
+    let mut cmd = ffmpeg::command(
+        ffmpeg::HlsEncodeRun {
+            input: file_path,
+            dir: &scratch,
+            start_time: 0.0,
+            start_index: 0,
+            transcode_audio: profile.transcode_audio,
+            deinterlace: profile.deinterlace,
+            // Один сегмент: меньше — риск, что муксер не успеет дописать заголовок.
+            max_seconds: Some(segments::GRID_SEGMENT_SECONDS),
+            segment_seconds: segments::GRID_SEGMENT_SECONDS,
+            init_name,
+        }
+        .to_args(),
+    );
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .context("Не удалось запустить ffmpeg для init")?;
+    let mut child = KillOnDropChild(child);
+    log_stderr(&mut child);
+
+    info!("ffmpeg init-ран запущен для {file_path:?} (dir={scratch:?})");
+
+    let status = child
+        .0
+        .wait()
+        .await
+        .context("Ошибка ожидания завершения ffmpeg (init)")?;
+    if !status.success() {
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        anyhow::bail!("ffmpeg (init) завершился с кодом {:?}", status.code());
+    }
+
+    let produced = scratch.join(init_name);
+    if !produced.exists() {
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        anyhow::bail!("init-ран не создал {init_name}");
+    }
+    // Публикуем через rename в пределах одного каталога — читатель не увидит недописанный файл.
+    let tmp = dir.join("init.tmp.mp4");
+    tokio::fs::copy(&produced, &tmp)
+        .await
+        .context("Не удалось скопировать init.mp4")?;
+    let _ = tokio::fs::rename(&tmp, &final_path).await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+
     Ok(())
 }
 

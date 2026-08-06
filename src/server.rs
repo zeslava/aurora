@@ -1632,8 +1632,20 @@ async fn hls_playlist_handler(
 async fn hls_segment_handler(
     State(state): State<AppState>,
     Path((id, segment)): Path<(String, String)>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, StatusCode> {
     let (media_file, profile, map) = segment_map_for(&state, &id).await?;
+
+    // Плейлист помечен профилем, при котором он был отрендерен. Расхождение означает, что
+    // у плеера на руках устаревший VOD-манифест (он их не перезапрашивает) — отвечаем 404,
+    // чтобы клиент перезагрузил плейлист, а не ретраил мёртвые URL.
+    if let Some(stale) = params.get("p").filter(|p| p.as_str() != profile.key()) {
+        tracing::warn!(
+            "HLS устаревший плейлист: media={id} {segment} профиль плейлиста={stale}, текущий={}",
+            profile.key()
+        );
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     // Входящий запрос логируем отдельно от результата: строка запроса без парной строки
     // «готов»/«таймаут» из transcoder означает, что клиент оборвал соединение сам (у hls.js
@@ -1656,8 +1668,9 @@ async fn hls_segment_handler(
             })?;
         (bytes, "video/mp4")
     } else {
-        let index =
-            segments::parse_segment_name(&segment, profile).ok_or(StatusCode::BAD_REQUEST)?;
+        // Имя не разбирается под текущий профиль, а маркера не было (старый плейлист без `p`
+        // или чужой запрос). Для клиента это то же самое «перезагрузи плейлист», что и выше.
+        let index = segments::parse_segment_name(&segment, profile).ok_or(StatusCode::NOT_FOUND)?;
         if index >= map.count() {
             return Err(StatusCode::NOT_FOUND);
         }
@@ -1995,6 +2008,84 @@ mod tests {
             &Some("yuv420p".to_string()),
             &None
         ));
+    }
+
+    /// Регрессия: запрос init.mp4 раньше запускал полноразмерный ран с нулевого сегмента.
+    /// При старте с середины файла это означало параллельный перекод всего фильма впустую
+    /// (в логе: ран с 0 дошёл до сегмента 205, пока смотрели со 104-го).
+    #[tokio::test]
+    async fn init_does_not_start_full_file_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        // mpeg4 → перекодирование видео, то есть fMP4 и init.mp4. Форма из матрицы,
+        // а не самодельная фикстура.
+        let shape = crate::testkit::Shape::matrix()
+            .into_iter()
+            .find(|s| s.name == "dvdrip_mpeg4_aac")
+            .expect("форма dvdrip_mpeg4_aac пропала из матрицы");
+        let file = shape.build(tmp.path());
+        let (state, id) = state_for_shape(&file, &shape).await;
+
+        let (status, _, _) = get(&state, &format!("/api/media/{id}/hls/init.mp4"), None).await;
+        assert_eq!(status, StatusCode::OK, "init.mp4");
+
+        let cache_dir = std::fs::read_dir(state.hls.root())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+            .expect("каталог кэша не создан");
+
+        let names: Vec<String> = std::fs::read_dir(&cache_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            names.iter().any(|n| n == "init.mp4"),
+            "нет init.mp4: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("segment")),
+            "init-ран оставил сегменты в кэше: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "init-scratch"),
+            "рабочий каталог init-рана не убран: {names:?}"
+        );
+    }
+
+    /// Устаревший VOD-манифест (hls.js их не перезапрашивает) должен получать 404,
+    /// а не бесконечные ретраи по мёртвым URL.
+    #[tokio::test]
+    async fn stale_playlist_marker_gets_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = make_fixture(tmp.path(), "movie_ac3.mkv", "ac3");
+        let (state, id) = state_with_movie(&file, "ac3").await;
+
+        // Профиль берём из самого плейлиста: он зависит не только от кодеков (короткая
+        // фикстура откатывается на перекодирование из-за нехватки keyframes).
+        let (_, _, body) = get(&state, &format!("/api/media/{id}/hls/playlist.m3u8"), None).await;
+        let playlist = String::from_utf8_lossy(&body).to_string();
+        let uri = playlist
+            .lines()
+            .find(|l| l.starts_with("segment"))
+            .expect("в плейлисте нет сегментов")
+            .to_string();
+        let (name, current) = uri.split_once("?p=").expect("в URI нет маркера профиля");
+
+        let (status, _, _) = get(&state, &format!("/api/media/{id}/hls/{uri}"), None).await;
+        assert_eq!(status, StatusCode::OK, "сегмент текущего профиля {uri}");
+
+        // Тот же сегмент с маркером другого профиля — устаревший плейлист.
+        let stale = if current == "av" { "a" } else { "av" };
+        let (status, _, _) = get(
+            &state,
+            &format!("/api/media/{id}/hls/{name}?p={stale}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "сегмент чужого профиля");
     }
 
     /// Регрессия: файлы, попавшие в БД до появления признака, остаются с NULL навсегда —
@@ -2522,7 +2613,7 @@ mod tests {
         let playlist = String::from_utf8_lossy(&playlist_body).to_string();
         let segments: Vec<&str> = playlist
             .lines()
-            .filter(|line| line.ends_with(".m4s"))
+            .filter(|line| line.contains(".m4s"))
             .collect();
         let middle = segments[segments.len() / 2];
 
@@ -2555,7 +2646,7 @@ mod tests {
         let playlist = String::from_utf8_lossy(&playlist_body).to_string();
         let lines: Vec<&str> = playlist.lines().collect();
         // Берём предпоследний сегмент — до него никто не обращался, ран пойдёт с середины
-        let pos = lines.iter().rposition(|l| l.ends_with(".ts")).unwrap() - 2;
+        let pos = lines.iter().rposition(|l| l.contains(".ts")).unwrap() - 2;
         let name = lines[pos];
         let want: f64 = lines[pos - 1]
             .strip_prefix("#EXTINF:")
@@ -2615,7 +2706,7 @@ mod tests {
             if let Some(dur) = line.strip_prefix("#EXTINF:") {
                 let dur: f64 = dur.trim_end_matches(',').parse().unwrap();
                 let name = lines.next().unwrap().to_string();
-                assert!(name.ends_with(".ts"), "неожиданное имя сегмента {name}");
+                assert!(name.contains(".ts"), "неожиданное имя сегмента {name}");
                 expected.push((name, dur));
             }
         }

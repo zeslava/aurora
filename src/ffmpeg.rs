@@ -212,6 +212,11 @@ pub struct HlsEncodeRun<'a> {
     /// (25 fps из 25 кадров), а не удвоение частоты: материал SD-эфира, платить вдвое
     /// большим декодом на телевизоре за это не стоит.
     pub deinterlace: bool,
+    /// Ограничение длительности рана. Задаётся только для init-рана, который стартует
+    /// с нуля файла: под `-copyts -start_at_zero` `-t` отсчитывается по исходной шкале
+    /// таймстемпов, поэтому для рана с середины он обрезал бы выход почти сразу
+    /// (замер: 1 пакет вместо 250). См. docs/decisions/0005.
+    pub max_seconds: Option<f64>,
     pub segment_seconds: f64,
     pub init_name: &'a str,
 }
@@ -253,6 +258,14 @@ impl HlsEncodeRun<'_> {
         args.push(OsString::from("-copyts"));
         args.push(OsString::from("-start_at_zero"));
         push(&mut args, "-muxdelay", "0");
+
+        if let Some(seconds) = self.max_seconds {
+            debug_assert!(
+                self.start_time == 0.0,
+                "-t под -copyts корректен только для рана с начала файла"
+            );
+            push(&mut args, "-t", format!("{seconds:.3}"));
+        }
 
         push(&mut args, "-f", "hls");
         push(&mut args, "-hls_time", format!("{}", self.segment_seconds));
@@ -424,6 +437,7 @@ mod tests {
                 start_index: 0,
                 transcode_audio: true,
                 deinterlace: true,
+                max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
             }
@@ -445,6 +459,7 @@ mod tests {
                 start_index: 0,
                 transcode_audio: true,
                 deinterlace: false,
+                max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
             }
@@ -464,6 +479,7 @@ mod tests {
                 start_index: 10,
                 transcode_audio: true,
                 deinterlace: false,
+                max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.10.tmp.mp4",
             }
@@ -495,6 +511,7 @@ mod tests {
                 start_index: 0,
                 transcode_audio: false,
                 deinterlace: false,
+                max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
             }
@@ -524,6 +541,7 @@ mod tests {
                 start_index: 0,
                 transcode_audio: true,
                 deinterlace: false,
+                max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
             }

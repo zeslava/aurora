@@ -128,59 +128,85 @@
         { once: true }
       );
     } else if (Hls.isSupported()) {
-      // Плейлист отдаётся, как только ffmpeg записал первый сегмент, но запуск
-      // кодирования может занять несколько секунд — стандартный 10-секундный
-      // таймаут hls.js мал и приводит к бесконечным ретраям.
-      hls = new Hls({
-        manifestLoadingTimeOut: 60000,
-        manifestLoadingMaxRetry: 2,
-        manifestLoadingRetryDelay: 2000,
-        // untrack: иначе эффект зависит от startTime и на каждом обновлении позиции
-        // пересоздаёт Hls — плеер начинал бы поток заново.
-        startPosition: untrack(() => startTime),
-      });
-      // Без этого обработчика фатальные ошибки hls.js проявляются как «видео просто встало»
-      hls.on(Hls.Events.ERROR, (_e, data) => {
-        console.error('hls.js:', data.type, data.details, data.fatal ? '(fatal)' : '', data);
-        if (!data.fatal || !hls) return;
-        fatalCount++;
-        if (fatalCount > 3) {
-          hls.destroy();
-          hls = null;
-          playbackError = 'Не удалось воспроизвести поток';
-          return;
-        }
-        const retry = () => {
-          if (!hls) return;
-          switch (data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              hls.startLoad();
-              break;
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              hls.recoverMediaError();
-              break;
-            default:
+      // Пересоздание Hls с нуля — единственный способ перечитать плейлист: VOD-манифест
+      // (с #EXT-X-ENDLIST) hls.js загружает один раз и больше не запрашивает. Позиция
+      // передаётся аргументом и берётся ровно один раз на создание — повторная установка
+      // гоняет плеер по таймлайну (см. коммит про «разгон плеера при возобновлении»).
+      const createHls = (position: number) => {
+        // Плейлист отдаётся, как только ffmpeg записал первый сегмент, но запуск
+        // кодирования может занять несколько секунд — стандартный 10-секундный
+        // таймаут hls.js мал и приводит к бесконечным ретраям.
+        hls = new Hls({
+          manifestLoadingTimeOut: 60000,
+          manifestLoadingMaxRetry: 2,
+          manifestLoadingRetryDelay: 2000,
+          startPosition: position,
+        });
+        // Без этого обработчика фатальные ошибки hls.js проявляются как «видео просто встало»
+        hls.on(Hls.Events.ERROR, (_e, data) => {
+          console.error('hls.js:', data.type, data.details, data.fatal ? '(fatal)' : '', data);
+          if (!data.fatal || !hls) return;
+          fatalCount++;
+          if (fatalCount > 3) {
+            hls.destroy();
+            hls = null;
+            playbackError = 'Не удалось воспроизвести поток';
+            return;
+          }
+          // 404 на фрагменте почти всегда означает, что профиль потока на сервере сменился
+          // и манифест на руках устарел (сервер помечает сегменты `?p=<профиль>` и отвечает
+          // 404 на чужой маркер). startLoad() тут бесполезен — он повторяет запросы по тем же
+          // мёртвым URL, что и выглядело как «видео просто висит минуту».
+          const stalePlaylist =
+            data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 404;
+
+          const retry = () => {
+            if (!hls) return;
+            if (stalePlaylist) {
+              const position = absoluteTime();
+              // Страховка на случай, если пересоздание тоже не выйдет: с сервера позиция
+              // читается при следующем открытии, а автосохранение отстаёт до 10 секунд.
+              saveProgress(position);
+              console.warn(`hls.js: устаревший плейлист, перечитываю с позиции ${position}`);
               hls.destroy();
               hls = null;
-          }
-        };
-        setTimeout(retry, 500 * fatalCount);
-      });
-      // Диагностика рассинхрона «ползунок vs. картинка»: видно, с какой позиции стартовали,
-      // какой фрагмент реально подставился в буфер и куда при этом смотрит playhead.
-      hls.on(Hls.Events.FRAG_CHANGED, (_e, data) => {
-        console.log(
-          `hls.js: фрагмент ${data.frag.sn} [${data.frag.start.toFixed(1)}..${(
-            data.frag.start + data.frag.duration
-          ).toFixed(1)}], currentTime=${video.currentTime.toFixed(1)}`
-        );
-      });
-      hls.loadSource(source);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        console.log(`hls.js: манифест разобран, startPosition=${startTime}`);
-        playIfNeeded();
-      });
+              createHls(position);
+              return;
+            }
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                hls.recoverMediaError();
+                break;
+              default:
+                hls.destroy();
+                hls = null;
+            }
+          };
+          setTimeout(retry, 500 * fatalCount);
+        });
+        // Диагностика рассинхрона «ползунок vs. картинка»: видно, с какой позиции стартовали,
+        // какой фрагмент реально подставился в буфер и куда при этом смотрит playhead.
+        hls.on(Hls.Events.FRAG_CHANGED, (_e, data) => {
+          console.log(
+            `hls.js: фрагмент ${data.frag.sn} [${data.frag.start.toFixed(1)}..${(
+              data.frag.start + data.frag.duration
+            ).toFixed(1)}], currentTime=${video.currentTime.toFixed(1)}`
+          );
+        });
+        hls.loadSource(source);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          console.log(`hls.js: манифест разобран, startPosition=${position}`);
+          playIfNeeded();
+        });
+      };
+
+      // untrack: иначе эффект зависит от startTime и на каждом обновлении позиции
+      // пересоздаёт Hls — плеер начинал бы поток заново.
+      createHls(untrack(() => startTime));
     } else {
       console.error('HLS не поддерживается этим браузером');
     }

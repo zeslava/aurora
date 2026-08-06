@@ -212,13 +212,16 @@ impl Boundaries {
         out.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
         out.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
         if profile.uses_fmp4() {
-            out.push_str("#EXT-X-MAP:URI=\"init.mp4\"\n");
+            out.push_str(&format!(
+                "#EXT-X-MAP:URI=\"init.mp4?p={}\"\n",
+                profile.key()
+            ));
         }
 
         for i in 0..self.count() {
             let dur = self.duration_of(i).unwrap_or(0.0);
             out.push_str(&format!("#EXTINF:{dur:.6},\n"));
-            out.push_str(&format!("{}\n", segment_name(i, profile)));
+            out.push_str(&format!("{}\n", segment_uri(i, profile)));
         }
 
         out.push_str("#EXT-X-ENDLIST\n");
@@ -235,6 +238,17 @@ pub fn segment_extension(profile: StreamProfile) -> &'static str {
 /// плейлист и генератор обязаны использовать одну и ту же схему.
 pub fn segment_name(index: usize, profile: StreamProfile) -> String {
     format!("segment{index:05}.{}", segment_extension(profile))
+}
+
+/// URI сегмента в плейлисте: имя файла плюс профиль, при котором плейлист был отрендерен.
+///
+/// Профиль в запросе нужен, чтобы отличить устаревший плейлист от битого запроса. VOD-манифест
+/// hls.js загружает один раз и никогда не перезапрашивает, поэтому после смены профиля файла
+/// (например, когда бэкфилл `field_order` перевёл его с copy на перекодирование) живой плеер
+/// продолжает просить сегменты старого контейнера. Без этого маркера сервер видел лишь
+/// неразбираемое имя и отвечал 400, а плеер молча ретраил его до фатальной ошибки.
+pub fn segment_uri(index: usize, profile: StreamProfile) -> String {
+    format!("{}?p={}", segment_name(index, profile), profile.key())
 }
 
 /// Разбирает имя сегмента обратно в номер. Возвращает `None` для чужих имён —
@@ -419,7 +433,7 @@ mod tests {
 
         assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
         assert!(playlist.contains("#EXT-X-ENDLIST"));
-        assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4\""));
+        assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4?p="));
         assert!(playlist.contains("#EXT-X-TARGETDURATION:6"));
         assert_eq!(playlist.matches("#EXTINF:").count(), 4);
         assert!(playlist.contains("segment00000.m4s"));
