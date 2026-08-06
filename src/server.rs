@@ -1778,9 +1778,12 @@ async fn get_progress_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    // «Ещё не смотрели» — это не ошибка, а нормальный ответ: 404 здесь означал бы, что нет
+    // самого медиа. Отдаём `null`, иначе каждый непросмотренный айтем в библиотеке засоряет
+    // консоль клиента красной строкой (на webOS её видно только через ares-inspect).
     let progress = match state.db.get_playback_state(user_id, file.id, id).await {
-        Ok(Some(progress)) => progress,
-        Ok(None) => return Err(StatusCode::NOT_FOUND),
+        Ok(Some(progress)) => Some(progress),
+        Ok(None) => None,
         Err(e) => {
             tracing::error!("Ошибка при получении прогресса: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);

@@ -246,9 +246,12 @@ class ApiClient {
   // Прогресс просмотра
   async getProgress(mediaId: string): Promise<PlaybackState | null> {
     try {
-      const response = await this.client.get<PlaybackState>(`/api/media/${mediaId}/progress`);
+      const response = await this.client.get<PlaybackState | null>(
+        `/api/media/${mediaId}/progress`
+      );
       return response.data;
     } catch (error) {
+      // 404 — ответ старого сервера на «ещё не смотрели»; новый отдаёт 200 с `null`
       if ((error as AxiosError).response?.status === 404) {
         return null;
       }
