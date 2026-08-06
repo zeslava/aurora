@@ -14,3 +14,4 @@
 - [0003 — Фикстура задаётся осями формы источника](0003-source-shape-matrix.md)
 - [0004 — Слои дизайн-системы и режимы ввода](0004-design-system-layers.md)
 - [0005 — Чересстрочный источник не может идти через `-c:v copy`](0005-interlaced-source-forces-transcode.md)
+- [0006 — Один HLS-движок на всех платформах](0006-single-hls-engine.md)
