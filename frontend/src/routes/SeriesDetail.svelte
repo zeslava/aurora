@@ -176,7 +176,7 @@
       fallback={media.backdrop}
       title={media.title}
       icon="📺"
-      objectPosition="center top"
+      objectPosition="center 30%"
     />
 
     <AppHeader transparent>
