@@ -11,14 +11,12 @@
   import type { MediaItem, PlaybackState, HomeResponse } from '../types';
 
   type FilterType = 'all' | 'movie' | 'tvseries';
-  type SortType = 'title' | 'year' | 'date';
 
   let media = $state<MediaItem[]>([]);
   let home = $state<HomeResponse | null>(null);
   let progressMap = $state<Record<string, PlaybackState>>({});
   let loading = $state(true);
   let filter = $state<FilterType>('all');
-  let sortBy = $state<SortType>('title');
   let pairOpen = $state(false);
 
   const loadMedia = async () => {
@@ -109,22 +107,7 @@
       filtered = filtered.filter((item) => item.type === filter);
     }
 
-    // Сортировка
-    return [...filtered].sort((a, b) => {
-      switch (sortBy) {
-        case 'title':
-          return a.title.localeCompare(b.title);
-        case 'year':
-          return (b.year || 0) - (a.year || 0);
-        case 'date': {
-          const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
-          const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
-          return dateB - dateA;
-        }
-        default:
-          return 0;
-      }
-    });
+    return [...filtered].sort((a, b) => a.title.localeCompare(b.title));
   });
 
   // Главный экран показываем только без фильтра
@@ -170,12 +153,6 @@
           Сериалы
         </button>
       </div>
-
-      <select bind:value={sortBy} class="select">
-        <option value="title">По названию</option>
-        <option value="year">По году</option>
-        <option value="date">По дате добавления</option>
-      </select>
     </div>
 
     <!-- Главный экран: продолжить просмотр + недавно добавленное -->
