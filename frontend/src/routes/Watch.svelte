@@ -154,6 +154,7 @@
           watched={watchedToEnd}
           {startTime}
           audioCodec={playable.audio_codec}
+          audioTracks={playable.audio_tracks ?? []}
         >
           {#snippet overlay()}
             <button onclick={() => navigate(backTo)} class="watch__back">← Назад</button>

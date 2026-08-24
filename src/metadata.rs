@@ -1,5 +1,5 @@
 use crate::ffmpeg;
-use crate::models::MediaMetadata;
+use crate::models::{AudioTrack, MediaMetadata};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::Path;
@@ -26,9 +26,9 @@ fn parse_ffprobe_output(json: &Value) -> Result<MediaMetadata> {
         .and_then(|d| d.parse::<f64>().ok())
         .map(|d| d as u64);
 
-    // Находим видео и аудио потоки
+    // Находим видео поток и все аудиодорожки
     let mut video_stream = None;
-    let mut audio_stream = None;
+    let mut audio_streams: Vec<&Value> = Vec::new();
 
     for stream in streams {
         let codec_type = stream
@@ -38,10 +38,36 @@ fn parse_ffprobe_output(json: &Value) -> Result<MediaMetadata> {
 
         match codec_type {
             "video" if video_stream.is_none() => video_stream = Some(stream),
-            "audio" if audio_stream.is_none() => audio_stream = Some(stream),
+            "audio" => audio_streams.push(stream),
             _ => {}
         }
     }
+
+    // Номер дорожки — позиция среди аудиопотоков: именно её понимает `-map 0:a:N`.
+    let audio_tracks: Vec<AudioTrack> = audio_streams
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let tag = |name: &str| {
+                s.get("tags")
+                    .and_then(|t| t.get(name))
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string())
+            };
+            AudioTrack {
+                index: i as u32,
+                codec: s
+                    .get("codec_name")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string()),
+                channels: s.get("channels").and_then(|c| c.as_u64()).map(|c| c as u32),
+                language: tag("language"),
+                title: tag("title"),
+            }
+        })
+        .collect();
+
+    let audio_stream = audio_streams.first().copied();
 
     // Извлекаем данные из видео потока
     let (width, height, video_codec, video_bitrate, pix_fmt, field_order) =
@@ -119,5 +145,6 @@ fn parse_ffprobe_output(json: &Value) -> Result<MediaMetadata> {
         video_bitrate,
         pix_fmt,
         field_order,
+        audio_tracks,
     })
 }

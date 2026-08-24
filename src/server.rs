@@ -1139,6 +1139,7 @@ async fn insert_file_if_new(state: &AppState, file_path: &PathBuf) -> Option<u64
         video_bitrate: None,
         pix_fmt: None,
         field_order: None,
+        audio_tracks: Vec::new(),
     };
 
     match extract_metadata(file_path) {
@@ -1150,6 +1151,7 @@ async fn insert_file_if_new(state: &AppState, file_path: &PathBuf) -> Option<u64
             file.video_bitrate = metadata.video_bitrate;
             file.pix_fmt = metadata.pix_fmt;
             file.field_order = metadata.field_order;
+            file.audio_tracks = metadata.audio_tracks;
         }
         Err(e) => tracing::warn!("Не удалось извлечь метаданные для {:?}: {}", file_path, e),
     }
@@ -1349,6 +1351,8 @@ struct StreamQuery {
     token: Option<String>,
     /// Время начала в секундах (для транскодированного потока)
     start: Option<u64>,
+    /// Номер аудиодорожки среди аудиопотоков файла
+    audio: Option<u32>,
 }
 
 /// Потоковая передача с транскодированием аудио (AC3 → AAC)
@@ -1368,7 +1372,8 @@ async fn stream_transcoded_handler(
 
     // Проверяем, нужен ли транскодинг (AC3, DTS и т.д.)
     // Браузеры не поддерживают AC3/DTS напрямую, поэтому транскодинг необходим
-    let needs_transcoding = needs_audio_transcoding(&media_file.audio_codec);
+    let audio_index = resolve_audio_index(&media_file, query.audio);
+    let needs_transcoding = needs_audio_transcoding(&audio_codec_of(&media_file, audio_index));
 
     if !needs_transcoding {
         // Если транскодинг не нужен, используем обычный поток с Range запросами
@@ -1415,12 +1420,17 @@ async fn stream_transcoded_handler(
     );
 
     // Создаем транскодер с ограниченной длительностью
-    let transcoder = AudioTranscoder::new(&file_path, start_time, Some(TRANSCODE_CHUNK_DURATION))
-        .await
-        .map_err(|e| {
-            tracing::error!("Ошибка создания транскодера: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let transcoder = AudioTranscoder::new(
+        &file_path,
+        start_time,
+        Some(TRANSCODE_CHUNK_DURATION),
+        audio_index,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Ошибка создания транскодера: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Определяем MIME тип (MP4 для потоковой передачи)
     let content_type = "video/mp4";
@@ -1454,6 +1464,28 @@ const BROWSER_VIDEO_CODECS: [&str; 2] = ["h264", "avc"];
 
 /// Браузер декодирует из fMP4 только AAC/Opus — для остального нужен транскодинг аудио.
 /// Неизвестный кодек (нет метаданных) оставляем как есть — иначе жгли бы CPU на всей библиотеке.
+/// Номер запрошенной дорожки, приведённый к тому, что есть в файле. Неизвестный номер
+/// (устаревший плейлист, ручной запрос) — это дорожка 0, а не ошибка: лучше отдать звук
+/// по умолчанию, чем сломать воспроизведение.
+fn resolve_audio_index(media_file: &MediaFile, requested: Option<u32>) -> u32 {
+    let count = media_file.audio_tracks.len() as u32;
+    match requested {
+        Some(i) if i < count => i,
+        _ => 0,
+    }
+}
+
+/// Кодек конкретной дорожки. У файлов, отсканированных до появления `audio_tracks`,
+/// список пуст — там остаётся единственный известный `audio_codec`.
+fn audio_codec_of(media_file: &MediaFile, index: u32) -> Option<String> {
+    media_file
+        .audio_tracks
+        .iter()
+        .find(|t| t.index == index)
+        .and_then(|t| t.codec.clone())
+        .or_else(|| media_file.audio_codec.clone())
+}
+
 fn needs_audio_transcoding(audio_codec: &Option<String>) -> bool {
     audio_codec
         .as_ref()
@@ -1539,6 +1571,7 @@ async fn cached_segment_map(
 async fn segment_map_for(
     state: &AppState,
     id: &str,
+    audio: Option<u32>,
 ) -> Result<(MediaFile, StreamProfile, SegmentMap), StatusCode> {
     let media_file = state
         .db
@@ -1547,14 +1580,16 @@ async fn segment_map_for(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let audio_index = resolve_audio_index(&media_file, audio);
     let mut profile = StreamProfile {
         transcode_video: needs_video_transcoding(
             &media_file.video_codec,
             &media_file.pix_fmt,
             &media_file.field_order,
         ),
-        transcode_audio: needs_audio_transcoding(&media_file.audio_codec),
+        transcode_audio: needs_audio_transcoding(&audio_codec_of(&media_file, audio_index)),
         deinterlace: is_interlaced(&media_file.field_order),
+        audio_index,
     };
 
     if let Some(map) = cached_segment_map(state, media_file.id, profile).await? {
@@ -1611,12 +1646,14 @@ async fn segment_map_for(
 async fn hls_playlist_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, StatusCode> {
-    let (_media_file, profile, map) = segment_map_for(&state, &id).await?;
+    let requested_audio = params.get("audio").and_then(|a| a.parse::<u32>().ok());
+    let (_media_file, profile, map) = segment_map_for(&state, &id, requested_audio).await?;
 
     tracing::info!(
         "HLS плейлист: media={id} профиль={} сегментов={}",
-        profile.key(),
+        profile.cache_key(),
         map.count()
     );
 
@@ -1634,15 +1671,27 @@ async fn hls_segment_handler(
     Path((id, segment)): Path<(String, String)>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, StatusCode> {
-    let (media_file, profile, map) = segment_map_for(&state, &id).await?;
+    let requested_audio = params.get("a").and_then(|a| a.parse::<u32>().ok());
+    let (media_file, profile, map) = segment_map_for(&state, &id, requested_audio).await?;
 
     // Плейлист помечен профилем, при котором он был отрендерен. Расхождение означает, что
     // у плеера на руках устаревший VOD-манифест (он их не перезапрашивает) — отвечаем 404,
     // чтобы клиент перезагрузил плейлист, а не ретраил мёртвые URL.
-    if let Some(stale) = params.get("p").filter(|p| p.as_str() != profile.key()) {
+    // Дорожка проверяется тем же способом: `a` из плейлиста, не совпавшая с выбранной
+    // (её нет в файле), означала бы, что сегменты придут с чужим звуком.
+    let stale_marker = params
+        .get("p")
+        .filter(|p| p.as_str() != profile.key())
+        .cloned()
+        .or_else(|| {
+            requested_audio
+                .filter(|a| *a != profile.audio_index)
+                .map(|a| format!("audio={a}"))
+        });
+    if let Some(stale) = stale_marker {
         tracing::warn!(
-            "HLS устаревший плейлист: media={id} {segment} профиль плейлиста={stale}, текущий={}",
-            profile.key()
+            "HLS устаревший плейлист: media={id} {segment} маркер={stale}, текущий={}",
+            profile.cache_key()
         );
         return Err(StatusCode::NOT_FOUND);
     }
@@ -1650,7 +1699,10 @@ async fn hls_segment_handler(
     // Входящий запрос логируем отдельно от результата: строка запроса без парной строки
     // «готов»/«таймаут» из transcoder означает, что клиент оборвал соединение сам (у hls.js
     // на первый байт фрагмента отведено 10с по умолчанию).
-    tracing::info!("HLS запрос: media={id} {segment} профиль={}", profile.key());
+    tracing::info!(
+        "HLS запрос: media={id} {segment} профиль={}",
+        profile.cache_key()
+    );
 
     let (bytes, content_type) = if segment == "init.mp4" {
         // init есть только у fMP4-профиля; в TS-плейлисте нет `EXT-X-MAP` и такого запроса
@@ -2075,7 +2127,8 @@ mod tests {
             .find(|l| l.starts_with("segment"))
             .expect("в плейлисте нет сегментов")
             .to_string();
-        let (name, current) = uri.split_once("?p=").expect("в URI нет маркера профиля");
+        let (name, query) = uri.split_once("?p=").expect("в URI нет маркера профиля");
+        let (current, _audio) = query.split_once("&a=").expect("в URI нет маркера дорожки");
 
         let (status, _, _) = get(&state, &format!("/api/media/{id}/hls/{uri}"), None).await;
         assert_eq!(status, StatusCode::OK, "сегмент текущего профиля {uri}");
@@ -2103,6 +2156,7 @@ mod tests {
             timestamps: crate::testkit::TimestampForm::Clean,
             gop: crate::testkit::GopForm::Uniform,
             seconds: 8,
+            extra_audio: &[],
         };
         let file = shape.build(tmp.path());
 
@@ -2385,6 +2439,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/009_audio_tracks.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         let db = crate::database::Database { pool };
 
         let file_id = db
@@ -2398,6 +2456,11 @@ mod tests {
                 video_bitrate: None,
                 pix_fmt: Some("yuv420p".into()),
                 field_order: field_order.map(|f| f.to_string()),
+                // Дорожки берём из самого файла: у многодорожечных фикстур тест
+                // проверяет выбор конкретной дорожки, а не переданный кодек.
+                audio_tracks: crate::metadata::extract_metadata(file_path)
+                    .map(|m| m.audio_tracks)
+                    .unwrap_or_default(),
             })
             .await
             .unwrap();
@@ -2832,6 +2895,105 @@ mod tests {
         }
     }
 
+    /// Тон дорожки в герцах, посчитанный по переходам через ноль. Кодек сегмента ничего
+    /// не говорит о том, какую дорожку взял ffmpeg, а тон переживает и перекодирование.
+    fn dominant_tone_hz(path: &std::path::Path) -> f64 {
+        const RATE: usize = 8000;
+        let out = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:a:0", "-ac", "1", "-ar", "8000"])
+            .args(["-f", "s16le", "-"])
+            .output()
+            .unwrap();
+        let samples: Vec<i16> = out
+            .stdout
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert!(samples.len() > RATE / 2, "в сегменте почти нет звука");
+        let crossings = samples
+            .windows(2)
+            .filter(|w| (w[0] < 0) != (w[1] < 0))
+            .count();
+        crossings as f64 / 2.0 / (samples.len() as f64 / RATE as f64)
+    }
+
+    /// Выбор дорожки: релиз с несколькими переводами должен отдавать именно запрошенную.
+    /// Фикстура кладёт в каждую дорожку свой тон (440/660/880 Гц) — по нему и проверяем.
+    #[tokio::test]
+    async fn requested_audio_track_is_the_one_served() {
+        if !ffmpeg_available() {
+            eprintln!("SKIP: ffmpeg/ffprobe недоступны");
+            return;
+        }
+        let shape = crate::testkit::Shape::matrix()
+            .into_iter()
+            .find(|s| !s.extra_audio.is_empty())
+            .expect("в матрице нет многодорожечной формы");
+        let tmp = tempfile::tempdir().unwrap();
+        let file = shape.build(tmp.path());
+        let (state, id) = state_for_shape(&file, &shape).await;
+
+        for (track, want_hz) in [(0u32, 440.0), (1, 660.0), (2, 880.0)] {
+            let (status, _, body) = get(
+                &state,
+                &format!("/api/media/{id}/hls/playlist.m3u8?audio={track}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "плейлист дорожки {track}");
+            let playlist = String::from_utf8_lossy(&body).to_string();
+            let name = playlist
+                .lines()
+                .find(|l| l.starts_with("segment"))
+                .expect("в плейлисте нет сегментов")
+                .to_string();
+            assert!(
+                name.contains(&format!("&a={track}")),
+                "URI сегмента без маркера дорожки: {name}"
+            );
+
+            let mut bytes = if playlist.contains("#EXT-X-MAP") {
+                let uri = playlist
+                    .lines()
+                    .find_map(|l| l.strip_prefix("#EXT-X-MAP:URI=\""))
+                    .and_then(|l| l.split('"').next())
+                    .unwrap()
+                    .to_string();
+                let (status, _, body) =
+                    get(&state, &format!("/api/media/{id}/hls/{uri}"), None).await;
+                assert_eq!(status, StatusCode::OK, "init.mp4 дорожки {track}");
+                body
+            } else {
+                Vec::new()
+            };
+
+            let (status, _, body) = get(&state, &format!("/api/media/{id}/hls/{name}"), None).await;
+            assert_eq!(status, StatusCode::OK, "сегмент дорожки {track}");
+            bytes.extend_from_slice(&body);
+
+            let path = tmp.path().join(format!("track{track}.seg"));
+            std::fs::write(&path, &bytes).unwrap();
+            let got = dominant_tone_hz(&path);
+            assert!(
+                (got - want_hz).abs() < 60.0,
+                "дорожка {track}: ожидали ~{want_hz} Гц, получили {got:.0} Гц"
+            );
+        }
+
+        // Сегменты разных дорожек не должны делить каталог кэша.
+        let dirs = std::fs::read_dir(state.hls.root())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("aurora-hls-"))
+            .count();
+        assert_eq!(
+            dirs, 3,
+            "у каждой дорожки должен быть свой каталог сегментов"
+        );
+    }
+
     /// Прогон по реальной библиотеке: по одному файлу на каждую группу
     /// `(video_codec, audio_codec, pix_fmt)`.
     ///
@@ -2937,7 +3099,9 @@ mod tests {
         dir: &std::path::Path,
         entries: &[(String, f64)],
     ) -> Vec<crate::testkit::SegmentUnderTest> {
-        let init = if entries.iter().any(|(n, _)| n.ends_with(".m4s")) {
+        // Имя сегмента в плейлисте несёт маркеры (`?p=…&a=…`), поэтому проверяем вхождение
+        // расширения, а не конец строки: иначе init не подклеивается и fMP4 не читается.
+        let init = if entries.iter().any(|(n, _)| n.contains(".m4s")) {
             let (status, _, body) =
                 get(state, &format!("/api/media/{id}/hls/init.mp4"), None).await;
             assert_eq!(status, StatusCode::OK, "init.mp4");

@@ -165,6 +165,8 @@ pub struct AudioTranscodeStream<'a> {
     pub input: &'a Path,
     /// Позиция seek в секундах; `-ss` идёт до `-i` — быстрый поиск по индексу.
     pub start_time: u64,
+    /// Номер аудиодорожки среди аудиопотоков файла.
+    pub audio_index: u32,
     pub duration: Option<u64>,
 }
 
@@ -176,7 +178,7 @@ impl AudioTranscodeStream<'_> {
         }
         push(&mut args, "-i", self.input);
         push(&mut args, "-map", "0:v:0");
-        push(&mut args, "-map", "0:a:0");
+        push(&mut args, "-map", format!("0:a:{}", self.audio_index));
         if let Some(dur) = self.duration {
             push(&mut args, "-t", dur.to_string());
         }
@@ -219,6 +221,8 @@ pub struct HlsEncodeRun<'a> {
     pub max_seconds: Option<f64>,
     pub segment_seconds: f64,
     pub init_name: &'a str,
+    /// Номер аудиодорожки среди аудиопотоков файла.
+    pub audio_index: u32,
 }
 
 impl HlsEncodeRun<'_> {
@@ -229,7 +233,7 @@ impl HlsEncodeRun<'_> {
         }
         push(&mut args, "-i", self.input);
         push(&mut args, "-map", "0:v:0");
-        push(&mut args, "-map", "0:a:0");
+        push(&mut args, "-map", format!("0:a:{}", self.audio_index));
 
         // Фильтр идёт до кодека: yadif работает над декодированными кадрами.
         if self.deinterlace {
@@ -305,6 +309,8 @@ pub struct CopySegment<'a> {
     pub from: f64,
     pub duration: f64,
     pub transcode_audio: bool,
+    /// Номер аудиодорожки среди аудиопотоков файла.
+    pub audio_index: u32,
     pub output: PathBuf,
 }
 
@@ -328,7 +334,7 @@ impl CopySegment<'_> {
         push(&mut args, "-t", format!("{:.6}", self.duration));
         push(&mut args, "-output_ts_offset", format!("{:.6}", self.from));
         push(&mut args, "-map", "0:v:0");
-        push(&mut args, "-map", "0:a:0");
+        push(&mut args, "-map", format!("0:a:{}", self.audio_index));
         push(&mut args, "-c:v", "copy");
         args.extend(audio_args(self.transcode_audio, true));
         push(&mut args, "-muxdelay", "0");
@@ -361,6 +367,7 @@ mod tests {
                 from: 100.0,
                 duration: 6.0,
                 transcode_audio: true,
+                audio_index: 0,
                 output: PathBuf::from("/tmp/seg.ts"),
             }
             .to_args(),
@@ -396,6 +403,7 @@ mod tests {
                 from: 4.0,
                 duration: 6.0,
                 transcode_audio: false,
+                audio_index: 0,
                 output: PathBuf::from("/tmp/seg.ts"),
             }
             .to_args(),
@@ -416,6 +424,7 @@ mod tests {
                 from: 0.0,
                 duration: 6.0,
                 transcode_audio: true,
+                audio_index: 0,
                 output: PathBuf::from("/tmp/seg.ts"),
             }
             .to_args(),
@@ -440,6 +449,7 @@ mod tests {
                 max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
+                audio_index: 0,
             }
             .to_args(),
         );
@@ -462,6 +472,7 @@ mod tests {
                 max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
+                audio_index: 0,
             }
             .to_args(),
         );
@@ -482,6 +493,7 @@ mod tests {
                 max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.10.tmp.mp4",
+                audio_index: 0,
             }
             .to_args(),
         );
@@ -514,6 +526,7 @@ mod tests {
                 max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
+                audio_index: 0,
             }
             .to_args(),
         );
@@ -529,6 +542,7 @@ mod tests {
                 from: 0.0,
                 duration: 6.0,
                 transcode_audio: true,
+                audio_index: 0,
                 output: PathBuf::from("/tmp/seg.ts"),
             }
             .to_args(),
@@ -544,6 +558,7 @@ mod tests {
                 max_seconds: None,
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
+                audio_index: 0,
             }
             .to_args(),
         );
@@ -563,6 +578,7 @@ mod tests {
             &AudioTranscodeStream {
                 input: Path::new("/m/f.mkv"),
                 start_time: 30,
+                audio_index: 0,
                 duration: Some(120),
             }
             .to_args(),
@@ -570,5 +586,65 @@ mod tests {
         assert!(index_of(&args, "-ss") < index_of(&args, "-i"));
         assert_eq!(args[index_of(&args, "-t") + 1], "120");
         assert_eq!(args.last().unwrap(), "-");
+    }
+}
+
+#[cfg(test)]
+mod audio_track_tests {
+    use super::*;
+
+    #[test]
+    fn recipes_map_requested_audio_track() {
+        let maps = |args: Vec<OsString>| -> Vec<String> {
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args.windows(2)
+                .filter(|w| w[0] == "-map")
+                .map(|w| w[1].clone())
+                .collect()
+        };
+
+        let copy = maps(
+            CopySegment {
+                input: Path::new("/m/f.mkv"),
+                from: 0.0,
+                duration: 6.0,
+                transcode_audio: true,
+                audio_index: 7,
+                output: PathBuf::from("/tmp/seg.ts"),
+            }
+            .to_args(),
+        );
+        assert_eq!(copy, vec!["0:v:0".to_string(), "0:a:7".to_string()]);
+
+        let encode = maps(
+            HlsEncodeRun {
+                input: Path::new("/m/f.mkv"),
+                dir: Path::new("/tmp"),
+                start_time: 0.0,
+                start_index: 0,
+                transcode_audio: true,
+                deinterlace: false,
+                max_seconds: None,
+                segment_seconds: 6.0,
+                init_name: "init.mp4",
+                audio_index: 3,
+            }
+            .to_args(),
+        );
+        assert_eq!(encode, vec!["0:v:0".to_string(), "0:a:3".to_string()]);
+
+        let stream = maps(
+            AudioTranscodeStream {
+                input: Path::new("/m/f.mkv"),
+                start_time: 0,
+                audio_index: 2,
+                duration: None,
+            }
+            .to_args(),
+        );
+        assert_eq!(stream, vec!["0:v:0".to_string(), "0:a:2".to_string()]);
     }
 }

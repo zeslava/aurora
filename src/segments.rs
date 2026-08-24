@@ -34,12 +34,16 @@ pub struct StreamProfile {
     /// кадры из полей. Всегда вместе с `transcode_video`: класть поля в fMP4 через
     /// `-c:v copy` нельзя, MSE их не декодирует.
     pub deinterlace: bool,
+    /// Номер аудиодорожки среди аудиопотоков файла (`-map 0:a:N`). У релизов с несколькими
+    /// переводами их бывают десятки; выбор приходит от клиента параметром `?audio=`.
+    pub audio_index: u32,
 }
 
 impl StreamProfile {
-    /// Стабильный строковый ключ профиля — часть имени каталога кэша и первичного ключа в БД.
-    /// Деинтерлейс в ключ не входит: он не меняет границы сегментов, а для конкретного
-    /// файла постоянен — карта в profile "v"/"av" одинакова с ним и без него.
+    /// Стабильный строковый ключ профиля — первичный ключ карты сегментов в БД.
+    /// Ни деинтерлейс, ни номер аудиодорожки в него не входят: границы сегментов задаёт
+    /// видео, а от этих полей оно не зависит — карта в profile "v"/"av" одинакова
+    /// с ними и без них. Для каталога сегментов нужен [`Self::cache_key`].
     pub fn key(&self) -> &'static str {
         match (self.transcode_video, self.transcode_audio) {
             (false, false) => "copy",
@@ -47,6 +51,13 @@ impl StreamProfile {
             (true, false) => "v",
             (true, true) => "av",
         }
+    }
+
+    /// Ключ каталога сгенерированных сегментов. В отличие от [`Self::key`] включает
+    /// аудиодорожку: сами сегменты у разных дорожек разные, смешивать их в одном каталоге
+    /// нельзя.
+    pub fn cache_key(&self) -> String {
+        format!("{}-a{}", self.key(), self.audio_index)
     }
 
     /// Контейнер сегментов. fMP4 — только когда видео перекодируется: там границы задаём сами
@@ -213,8 +224,9 @@ impl Boundaries {
         out.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
         if profile.uses_fmp4() {
             out.push_str(&format!(
-                "#EXT-X-MAP:URI=\"init.mp4?p={}\"\n",
-                profile.key()
+                "#EXT-X-MAP:URI=\"init.mp4?p={}&a={}\"\n",
+                profile.key(),
+                profile.audio_index
             ));
         }
 
@@ -248,7 +260,12 @@ pub fn segment_name(index: usize, profile: StreamProfile) -> String {
 /// продолжает просить сегменты старого контейнера. Без этого маркера сервер видел лишь
 /// неразбираемое имя и отвечал 400, а плеер молча ретраил его до фатальной ошибки.
 pub fn segment_uri(index: usize, profile: StreamProfile) -> String {
-    format!("{}?p={}", segment_name(index, profile), profile.key())
+    format!(
+        "{}?p={}&a={}",
+        segment_name(index, profile),
+        profile.key(),
+        profile.audio_index
+    )
 }
 
 /// Разбирает имя сегмента обратно в номер. Возвращает `None` для чужих имён —
@@ -420,11 +437,13 @@ mod tests {
         transcode_video: true,
         transcode_audio: true,
         deinterlace: false,
+        audio_index: 0,
     };
     const TS: StreamProfile = StreamProfile {
         transcode_video: false,
         transcode_audio: true,
         deinterlace: false,
+        audio_index: 0,
     };
 
     #[test]
@@ -502,6 +521,22 @@ mod tests {
         assert_eq!(parse_keyframe_csv(stdout), vec![0.0, 4.0, 6.0]);
     }
 
+    /// Карта сегментов от аудиодорожки не зависит и переиспользуется между дорожками,
+    /// а каталог сегментов — обязан различаться.
+    #[test]
+    fn audio_track_changes_cache_key_but_not_map_key() {
+        let first = StreamProfile {
+            audio_index: 0,
+            ..FMP4
+        };
+        let second = StreamProfile {
+            audio_index: 3,
+            ..FMP4
+        };
+        assert_eq!(first.key(), second.key());
+        assert_ne!(first.cache_key(), second.cache_key());
+    }
+
     #[test]
     fn profile_keys_are_distinct() {
         let keys: Vec<&str> = [(false, false), (false, true), (true, false), (true, true)]
@@ -511,6 +546,7 @@ mod tests {
                     transcode_video: v,
                     transcode_audio: a,
                     deinterlace: false,
+                    audio_index: 0,
                 }
                 .key()
             })

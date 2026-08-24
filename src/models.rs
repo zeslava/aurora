@@ -12,6 +12,21 @@ pub enum MediaType {
     TvSeries,
 }
 
+/// Одна аудиодорожка файла. `index` — порядковый номер среди аудиопотоков (то же, что `N`
+/// в `-map 0:a:N`), а не глобальный индекс потока в контейнере.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioTrack {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
 /// Физический медиафайл — единственный носитель информации о файле и кодеках.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaFile {
@@ -33,6 +48,8 @@ pub struct MediaFile {
     pub pix_fmt: Option<String>,
     /// Порядок полей развёртки: "progressive" | "tt" | "bb" | "tb" | "bt"
     pub field_order: Option<String>,
+    /// Все аудиодорожки файла. Пусто у записей, отсканированных до появления колонки.
+    pub audio_tracks: Vec<AudioTrack>,
 }
 
 /// Технические характеристики воспроизводимой сущности — общая часть фильма и
@@ -56,6 +73,9 @@ pub struct MediaFileInfo {
     pub pix_fmt: Option<String>,
     /// Порядок полей развёртки
     pub field_order: Option<String>,
+    /// Аудиодорожки для выбора в плеере
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_tracks: Vec<AudioTrack>,
 }
 
 /// Медиа элемент — контейнер: фильм или сериал.
@@ -139,6 +159,8 @@ pub struct MediaMetadata {
     pub pix_fmt: Option<String>,
     /// Порядок полей развёртки: "progressive" | "tt" | "bb" | "tb" | "bt"
     pub field_order: Option<String>,
+    /// Все аудиодорожки файла. Пусто у записей, отсканированных до появления колонки.
+    pub audio_tracks: Vec<AudioTrack>,
 }
 
 impl MediaMetadata {

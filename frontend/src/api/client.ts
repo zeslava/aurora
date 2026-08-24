@@ -227,8 +227,8 @@ class ApiClient {
     return url;
   }
 
-  getHlsUrl(id: string): string {
-    return `${this.baseUrl}/api/media/${id}/hls/playlist.m3u8`;
+  getHlsUrl(id: string, audioIndex = 0): string {
+    return `${this.baseUrl}/api/media/${id}/hls/playlist.m3u8?audio=${audioIndex}`;
   }
 
   // Абсолютный URL картинки: бэкенд отдаёт относительный путь, а в упакованном

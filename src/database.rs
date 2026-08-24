@@ -1,6 +1,6 @@
 use crate::models::{
-    ContinueWatchingItem, Episode, Library, MediaFile, MediaFileInfo, MediaItem, MediaType,
-    PlaybackState, TmdbInfo,
+    AudioTrack, ContinueWatchingItem, Episode, Library, MediaFile, MediaFileInfo, MediaItem,
+    MediaType, PlaybackState, TmdbInfo,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -144,8 +144,8 @@ impl Database {
     /// Вставляет физический файл, возвращает его id
     pub async fn insert_media_file(&self, file: &MediaFile) -> Result<u64> {
         let result = sqlx::query(
-            "INSERT INTO media_files (file_path, duration, resolution, video_codec, audio_codec, video_bitrate, pix_fmt, field_order)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO media_files (file_path, duration, resolution, video_codec, audio_codec, video_bitrate, pix_fmt, field_order, audio_tracks)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING id",
         )
         .bind(file.file_path.to_string_lossy().as_ref())
@@ -156,6 +156,7 @@ impl Database {
         .bind(file.video_bitrate.map(|b| b as i64))
         .bind(&file.pix_fmt)
         .bind(&file.field_order)
+        .bind(audio_tracks_to_json(&file.audio_tracks))
         .fetch_one(&self.pool)
         .await
         .context("Не удалось вставить медиафайл")?;
@@ -1029,14 +1030,30 @@ fn row_to_media_file(row: sqlx::sqlite::SqliteRow) -> MediaFile {
         video_bitrate: row.get::<Option<i64>, _>(6).map(|b| b as u64),
         pix_fmt: row.get::<Option<String>, _>(7),
         field_order: row.get::<Option<String>, _>(8),
+        audio_tracks: audio_tracks_from_json(row.get::<Option<String>, _>(9)),
     }
+}
+
+/// Дорожки хранятся одной JSON-колонкой: их читают только целиком, для выбора в плеере,
+/// и по ним никогда не ищут — отдельная таблица не окупается.
+fn audio_tracks_to_json(tracks: &[AudioTrack]) -> Option<String> {
+    if tracks.is_empty() {
+        return None;
+    }
+    serde_json::to_string(tracks).ok()
+}
+
+/// Битый или отсутствующий JSON — пустой список: сервер трактует его как «одна дорожка 0».
+fn audio_tracks_from_json(json: Option<String>) -> Vec<AudioTrack> {
+    json.and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default()
 }
 
 /// Общая часть SELECT'а для полей файла — порядок колонок фиксирован и разбирается
 /// в `row_to_file_info` начиная с `offset`.
 const FILE_COLUMNS: &str = "mf.id, mf.file_path, mf.duration, mf.resolution, \
                             mf.video_codec, mf.audio_codec, mf.video_bitrate, mf.pix_fmt, \
-                            mf.field_order";
+                            mf.field_order, mf.audio_tracks";
 
 /// Колонки метаданных TMDB — идут в SELECT'ах сразу после `FILE_COLUMNS`
 /// и разбираются в `row_to_tmdb_info`.
@@ -1068,7 +1085,7 @@ fn row_to_tmdb_info(row: &sqlx::sqlite::SqliteRow, offset: usize, media_id: &str
     }
 }
 
-/// Разбирает 9 колонок файла (`FILE_COLUMNS`), начиная с `offset`.
+/// Разбирает 10 колонок файла (`FILE_COLUMNS`), начиная с `offset`.
 /// Колонка `mf.id` (по смещению `offset`) не нужна наружу и пропускается.
 fn row_to_file_info(row: &sqlx::sqlite::SqliteRow, offset: usize) -> MediaFileInfo {
     MediaFileInfo {
@@ -1083,11 +1100,12 @@ fn row_to_file_info(row: &sqlx::sqlite::SqliteRow, offset: usize) -> MediaFileIn
         video_bitrate: row.get::<Option<i64>, _>(offset + 6).map(|b| b as u64),
         pix_fmt: row.get::<Option<String>, _>(offset + 7),
         field_order: row.get::<Option<String>, _>(offset + 8),
+        audio_tracks: audio_tracks_from_json(row.get::<Option<String>, _>(offset + 9)),
     }
 }
 
 /// Ожидает колонки: id, library_id, title, year, media_type, created_at,
-/// затем `FILE_COLUMNS` (9 колонок), `TMDB_COLUMNS` (5 колонок) и custom_title
+/// затем `FILE_COLUMNS` (10 колонок), `TMDB_COLUMNS` (5 колонок) и custom_title
 fn row_to_media_item(row: sqlx::sqlite::SqliteRow) -> MediaItem {
     let media_type = match row.get::<String, _>(4).as_str() {
         "tv" => MediaType::TvSeries,
@@ -1096,11 +1114,11 @@ fn row_to_media_item(row: sqlx::sqlite::SqliteRow) -> MediaItem {
     let id = row.get::<String, _>(0);
 
     MediaItem {
-        tmdb: row_to_tmdb_info(&row, 15, &id),
+        tmdb: row_to_tmdb_info(&row, 16, &id),
         id,
         library_id: row.get::<Option<i64>, _>(1).map(|id| id as u64),
         title: row.get::<String, _>(2),
-        custom_title: row.get::<Option<String>, _>(20),
+        custom_title: row.get::<Option<String>, _>(21),
         year: row.get::<Option<i64>, _>(3).map(|y| y as u32),
         media_type,
         created_at: parse_created_at(row.get::<Option<String>, _>(5)),
@@ -1148,6 +1166,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/009_audio_tracks.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         Database { pool }
     }
@@ -1163,6 +1185,7 @@ mod tests {
             video_bitrate: None,
             pix_fmt: None,
             field_order: None,
+            audio_tracks: Vec::new(),
         })
         .await
         .unwrap()

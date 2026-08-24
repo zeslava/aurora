@@ -2,6 +2,7 @@
   import Hls from 'hls.js';
   import { untrack, type Snippet } from 'svelte';
   import { apiClient } from '../api/client';
+  import type { AudioTrack } from '../types';
 
   interface Props {
     src: string;
@@ -12,6 +13,7 @@
     autoplay?: boolean;
     startTime?: number;
     audioCodec?: string; // Аудио кодек для диагностики
+    audioTracks?: AudioTrack[]; // Аудиодорожки файла (переводы) — для выбора в плеере
     transcoded?: boolean; // Используется ли транскодированный поток
     onSrcChange?: (newSrc: string) => void; // Callback для обновления src при перемотке
     onNextEpisode?: () => void; // Переход к следующему эпизоду (undefined — если следующего нет)
@@ -28,12 +30,36 @@
     autoplay = false,
     startTime = 0,
     audioCodec,
+    audioTracks = [],
     transcoded = false,
     onSrcChange,
     onNextEpisode,
     watched = false,
     overlay,
   }: Props = $props();
+
+  const audioTrackKey = (id: string) => `aurora.audioTrack.${id}`;
+
+  /// Выбор перевода запоминается на файл: вернувшись к фильму, зритель ждёт тот же голос.
+  const storedAudioIndex = (id: string): number => {
+    try {
+      const raw = localStorage.getItem(audioTrackKey(id));
+      const parsed = raw === null ? NaN : Number(raw);
+      return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  /// Подпись дорожки: язык и число каналов различают переводы лучше, чем номер.
+  const audioTrackLabel = (track: AudioTrack): string => {
+    const parts = [`Дорожка ${track.index + 1}`];
+    if (track.language) parts.push(track.language.toUpperCase());
+    if (track.codec) parts.push(track.codec.toUpperCase());
+    if (track.channels) parts.push(track.channels === 6 ? '5.1' : `${track.channels}.0`);
+    if (track.title) parts.push(track.title);
+    return parts.join(' · ');
+  };
 
   // За сколько секунд до конца показывать оверлей «Следующий эпизод»
   const NEXT_EP_THRESHOLD = 15;
@@ -52,6 +78,7 @@
   let currentTime = $state(startTime);
   let isFullscreen = $state(false);
   let showControls = $state(true);
+  let audioMenuOpen = $state(false);
 
   // Снимок id: при размонтировании родитель уже мог обнулить своё состояние,
   // а teardown-эффекты читают пропсы лениво (геттеры) — отсюда падение на null
@@ -72,7 +99,14 @@
 
   let isHls = $derived(src.includes('.m3u8'));
   let offsetActive = $derived(transcoded && !isHls);
-  let hlsSrc = $derived(isHls ? apiClient.getHlsUrl(mediaId) : src);
+  // Выбранная дорожка живёт в плеере: сервер отдаёт её в плейлисте, поэтому смена
+  // дорожки — это смена источника, а не переключение внутри готового потока.
+  let audioIndex = $state(untrack(() => storedAudioIndex(mediaId)));
+  // Позиция, с которой пересоздаётся hls.js после смены дорожки. `startTime` для этого
+  // не годится: он остаётся стартовым на весь просмотр.
+  let resumePosition: number | null = null;
+
+  let hlsSrc = $derived(isHls ? apiClient.getHlsUrl(mediaId, audioIndex) : src);
 
   // HLS-поток: hls.js (MSE) везде, где есть MSE, — включая webOS/Tizen. Нативный HLS
   // остаётся только фолбэком для браузеров без MSE (старая Safari на iOS).
@@ -213,7 +247,8 @@
 
       // untrack: иначе эффект зависит от startTime и на каждом обновлении позиции
       // пересоздаёт Hls — плеер начинал бы поток заново.
-      createHls(untrack(() => startTime));
+      createHls(untrack(() => resumePosition ?? startTime));
+      resumePosition = null;
     } else {
       console.error('HLS не поддерживается этим браузером');
     }
@@ -226,6 +261,22 @@
       }
     };
   });
+
+  const selectAudioTrack = (index: number) => {
+    if (index === audioIndex) return;
+    // Позицию сохраняем и на сервер: пересоздание плеера — единственный момент, когда
+    // её легко потерять, а автосохранение отстаёт до 10 секунд.
+    const position = absoluteTime();
+    resumePosition = position;
+    saveProgress(position);
+    audioIndex = index;
+    try {
+      localStorage.setItem(audioTrackKey(mediaId), String(index));
+    } catch {
+      // Приватный режим/выключенное хранилище — выбор просто не переживёт перезагрузку.
+    }
+    audioMenuOpen = false;
+  };
 
   // Последняя известная позиция: при размонтировании hls.destroy()/detachMedia
   // успевает сбросить videoEl.currentTime в 0 раньше, чем отработает flushProgress
@@ -911,15 +962,47 @@
         </div>
       </div>
 
-      <button
-        onclick={handleFullscreen}
-        class="btn--icon"
-        title={isFullscreen ? 'Выйти из полного экрана' : 'Полный экран'}
-      >
-        <svg class="icon icon--md" fill="currentColor" viewBox="0 -960 960 960">
+      <div class="controls__group">
+        {#if audioTracks.length > 1}
+          <div class="audio-menu">
+            {#if audioMenuOpen}
+              <ul class="audio-menu__list">
+                {#each audioTracks as track (track.index)}
+                  <li>
+                    <button
+                      class="audio-menu__item"
+                      class:audio-menu__item--active={track.index === audioIndex}
+                      onclick={() => selectAudioTrack(track.index)}
+                    >
+                      {audioTrackLabel(track)}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <button
+              onclick={() => (audioMenuOpen = !audioMenuOpen)}
+              class="btn--icon"
+              title="Аудиодорожка"
+              aria-expanded={audioMenuOpen}
+            >
+              <svg class="icon icon--md" fill="currentColor" viewBox="0 -960 960 960">
+                <path d="M280-360q-17 0-28.5-11.5T240-400v-160q0-17 11.5-28.5T280-600h100l114-114q19-19 42.5-8.5T560-686v412q0 26-23.5 36.5T494-246L380-360H280Zm400-120q0 32-14 60t-38 45q-9 5-18.5 0t-9.5-16v-179q0-11 9.5-16t18.5 0q24 18 38 46t14 60Z" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
+        <button
+          onclick={handleFullscreen}
+          class="btn--icon"
+          title={isFullscreen ? 'Выйти из полного экрана' : 'Полный экран'}
+        >
+          <svg class="icon icon--md" fill="currentColor" viewBox="0 -960 960 960">
             <path d="M180-180h103q12.75 0 21.38 8.68 8.62 8.67 8.62 21.5 0 12.82-8.62 21.32-8.63 8.5-21.38 8.5H150q-12.75 0-21.37-8.63Q120-137.25 120-150v-133q0-12.75 8.68-21.38 8.67-8.62 21.5-8.62 12.82 0 21.32 8.62 8.5 8.63 8.5 21.38v103Zm600 0v-103q0-12.75 8.68-21.38 8.67-8.62 21.5-8.62 12.82 0 21.32 8.62 8.5 8.63 8.5 21.38v133q0 12.75-8.62 21.37Q822.75-120 810-120H677q-12.75 0-21.37-8.68-8.63-8.67-8.63-21.5 0-12.82 8.63-21.32 8.62-8.5 21.37-8.5h103ZM180-780v103q0 12.75-8.68 21.37-8.67 8.63-21.5 8.63-12.82 0-21.32-8.63-8.5-8.62-8.5-21.37v-133q0-12.75 8.63-21.38Q137.25-840 150-840h133q12.75 0 21.38 8.68 8.62 8.67 8.62 21.5 0 12.82-8.62 21.32-8.63 8.5-21.38 8.5H180Zm600 0H677q-12.75 0-21.37-8.68-8.63-8.67-8.63-21.5 0-12.82 8.63-21.32 8.62-8.5 21.37-8.5h133q12.75 0 21.38 8.62Q840-822.75 840-810v133q0 12.75-8.68 21.37-8.67 8.63-21.5 8.63-12.82 0-21.32-8.63-8.5-8.62-8.5-21.37v-103Z" />
           </svg>
-      </button>
+        </button>
+      </div>
     </div>
   </div>
 </div>
@@ -1052,6 +1135,47 @@
 
   .controls__time {
     font-size: var(--text-sm);
+  }
+
+  /* ── Выбор аудиодорожки ──────────────────────────────────────── */
+
+  .audio-menu {
+    position: relative;
+  }
+
+  .audio-menu__list {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + var(--space-2));
+    z-index: var(--z-raised);
+    min-width: 16rem;
+    max-height: 40vh;
+    overflow-y: auto;
+    padding: var(--space-2);
+    border-radius: var(--radius);
+    background-color: var(--surface-2);
+    list-style: none;
+  }
+
+  .audio-menu__item {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: 0;
+    border-radius: var(--radius);
+    background: none;
+    color: inherit;
+    font-size: var(--text-sm);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .audio-menu__item:hover,
+  .audio-menu__item:focus-visible {
+    background-color: var(--surface-3);
+  }
+
+  .audio-menu__item--active {
+    color: var(--accent);
   }
 
   .icon {

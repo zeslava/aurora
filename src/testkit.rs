@@ -101,6 +101,10 @@ pub struct Shape {
     pub timestamps: TimestampForm,
     pub gop: GopForm,
     pub seconds: u32,
+    /// Дополнительные аудиодорожки сверх основной (`audio`). Релизы с несколькими
+    /// переводами — до двух десятков дорожек разных кодеков и каналов; сервер должен
+    /// уметь отдать любую, а не только первую.
+    pub extra_audio: &'static [AudioForm],
 }
 
 impl Shape {
@@ -162,12 +166,19 @@ impl Shape {
             "-i",
             &format!("testsrc=duration={seconds}:size=320x240:rate=25"),
         ]);
-        cmd.args([
-            "-f",
-            "lavfi",
-            "-i",
-            &format!("sine=frequency=440:duration={seconds}"),
-        ]);
+        // Каждая дорожка — отдельный вход с собственной частотой тона: так тест может
+        // отличить выданную дорожку от соседней, а не только сосчитать их.
+        let tones: Vec<u32> = (0..=self.extra_audio.len())
+            .map(|i| 440 + 220 * i as u32)
+            .collect();
+        for tone in &tones {
+            cmd.args([
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency={tone}:duration={seconds}"),
+            ]);
+        }
 
         match self.video {
             VideoForm::H264 => {
@@ -207,7 +218,18 @@ impl Shape {
             "-force_key_frames",
             &self.key_frames(),
         ]);
-        cmd.args(["-c:a", self.audio.codec()]);
+        // С несколькими аудиовходами автоматический выбор потоков берёт ровно один —
+        // маппинг задаём явно, иначе ось вырождается в один звук.
+        cmd.args(["-map", "0:v:0"]);
+        for i in 0..tones.len() {
+            cmd.args(["-map", &format!("{}:a:0", i + 1)]);
+        }
+        for (i, form) in std::iter::once(&self.audio)
+            .chain(self.extra_audio.iter())
+            .enumerate()
+        {
+            cmd.args([&format!("-c:a:{i}"), form.codec()]);
+        }
         cmd.arg("-shortest").arg(&path);
 
         let status = cmd.status().expect("не удалось запустить ffmpeg");
@@ -300,6 +322,7 @@ impl Shape {
                 timestamps: TimestampForm::Clean,
                 gop: GopForm::Uniform,
                 seconds: 30,
+                extra_audio: &[],
             },
             // Breaking Bad: copy-видео, рваный GOP, dts=N/A в начале.
             Shape {
@@ -309,6 +332,7 @@ impl Shape {
                 timestamps: TimestampForm::NaDtsAtStart,
                 gop: GopForm::Ragged,
                 seconds: 30,
+                extra_audio: &[],
             },
             // Gossip Girl: то же, но keyframes через 0.4 c — граничный случай схлопывания.
             Shape {
@@ -318,6 +342,7 @@ impl Shape {
                 timestamps: TimestampForm::NaDtsAtStart,
                 gop: GopForm::Dense,
                 seconds: 30,
+                extra_audio: &[],
             },
             // Scooby Doo: avi без pts, mpeg4 → перекодирование видео, fMP4 + равномерная сетка.
             Shape {
@@ -327,6 +352,7 @@ impl Shape {
                 timestamps: TimestampForm::NoPts,
                 gop: GopForm::Ragged,
                 seconds: 30,
+                extra_audio: &[],
             },
             // ВОСЬМИДЕСЯТЫЕ (DVB): чересстрочный h264 + mp2 в MPEG-TS. Кодек браузерный,
             // поэтому до появления проверки field_order файл уходил в `-c:v copy`.
@@ -337,6 +363,18 @@ impl Shape {
                 timestamps: TimestampForm::Clean,
                 gop: GopForm::Uniform,
                 seconds: 30,
+                extra_audio: &[],
+            },
+            // Мультиперевод: одна дорожка браузерная, остальные нет — сервер обязан
+            // выбирать профиль по запрошенной дорожке, а не по первой.
+            Shape {
+                name: "multitrack_h264_ac3",
+                video: VideoForm::H264,
+                audio: AudioForm::Ac3,
+                timestamps: TimestampForm::Clean,
+                gop: GopForm::Uniform,
+                seconds: 30,
+                extra_audio: &[AudioForm::Aac, AudioForm::Mp3],
             },
             // Аудио уже браузерное при неудобном видео: единственная комбинация, где
             // перекодируется видео, но не звук.
@@ -347,6 +385,7 @@ impl Shape {
                 timestamps: TimestampForm::NoPts,
                 gop: GopForm::Ragged,
                 seconds: 30,
+                extra_audio: &[],
             },
         ]
     }

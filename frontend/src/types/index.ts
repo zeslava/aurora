@@ -1,5 +1,14 @@
 export type MediaType = 'movie' | 'tvseries';
 
+/// Одна аудиодорожка файла. index — номер среди аудиопотоков, его и просит сервер в ?audio=
+export interface AudioTrack {
+  index: number;
+  codec?: string;
+  channels?: number;
+  language?: string;
+  title?: string;
+}
+
 /// Технические характеристики файла — общая часть фильма и эпизода
 export interface MediaFileInfo {
   file_path: string;
@@ -9,6 +18,7 @@ export interface MediaFileInfo {
   audio_codec?: string;
   video_bitrate?: number;
   pix_fmt?: string;
+  audio_tracks?: AudioTrack[];
 }
 
 /// Метаданные TMDB. poster/backdrop — относительные пути на этот же сервер

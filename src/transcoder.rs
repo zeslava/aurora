@@ -23,7 +23,12 @@ pub struct AudioTranscoder {
 
 impl AudioTranscoder {
     /// Создает новый транскодер для файла
-    pub async fn new(file_path: &Path, start_time: u64, duration: Option<u64>) -> Result<Self> {
+    pub async fn new(
+        file_path: &Path,
+        start_time: u64,
+        duration: Option<u64>,
+        audio_index: u32,
+    ) -> Result<Self> {
         if !ffmpeg::is_ffmpeg_available() {
             anyhow::bail!(
                 "ffmpeg не найден. Установите ffmpeg для транскодирования аудио: sudo apt-get install ffmpeg"
@@ -34,6 +39,7 @@ impl AudioTranscoder {
             ffmpeg::AudioTranscodeStream {
                 input: file_path,
                 start_time,
+                audio_index,
                 duration,
             }
             .to_args(),
@@ -220,7 +226,7 @@ fn cache_key(file_id: u64, profile: segments::StreamProfile, file_path: &Path) -
                 .hash(&mut hasher);
         }
     }
-    format!("{file_id}-{}-{:016x}", profile.key(), hasher.finish())
+    format!("{file_id}-{}-{:016x}", profile.cache_key(), hasher.finish())
 }
 
 /// Управляет кэшами сегментов по файлу и профилю: генерирует init/сегменты лениво,
@@ -540,6 +546,7 @@ async fn spawn_run(
             start_time,
             start_index,
             transcode_audio: profile.transcode_audio,
+            audio_index: profile.audio_index,
             deinterlace: profile.deinterlace,
             max_seconds: None,
             segment_seconds: segments::GRID_SEGMENT_SECONDS,
@@ -611,6 +618,7 @@ async fn spawn_init_run(
             start_time: 0.0,
             start_index: 0,
             transcode_audio: profile.transcode_audio,
+            audio_index: profile.audio_index,
             deinterlace: profile.deinterlace,
             // Один сегмент: меньше — риск, что муксер не успеет дописать заголовок.
             max_seconds: Some(segments::GRID_SEGMENT_SECONDS),
@@ -691,6 +699,7 @@ async fn run_copy_segments(
                 from,
                 duration: len,
                 transcode_audio: profile.transcode_audio,
+                audio_index: profile.audio_index,
                 output: tmp.clone(),
             }
             .to_args(),
