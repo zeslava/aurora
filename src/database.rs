@@ -799,6 +799,43 @@ impl Database {
             .collect())
     }
 
+    /// Файлы, у которых список аудиодорожек ещё не читали. Пустой массив (`"[]"`) —
+    /// это «пробовали, дорожек не нашли», такие файлы очередь больше не выбирает.
+    pub async fn get_files_pending_audio_tracks(&self, limit: i64) -> Result<Vec<(u64, PathBuf)>> {
+        let rows = sqlx::query(
+            "SELECT id, file_path FROM media_files
+             WHERE audio_tracks IS NULL
+             ORDER BY id LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Не удалось получить файлы без audio_tracks")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<i64, _>(0) as u64,
+                    PathBuf::from(row.get::<String, _>(1)),
+                )
+            })
+            .collect())
+    }
+
+    /// Проставляет список аудиодорожек. Карты сегментов сбрасывать не нужно: от дорожки
+    /// они не зависят (см. docs/decisions/0007).
+    pub async fn set_audio_tracks(&self, file_id: u64, tracks: &[AudioTrack]) -> Result<()> {
+        sqlx::query("UPDATE media_files SET audio_tracks = ? WHERE id = ?")
+            .bind(serde_json::to_string(tracks).unwrap_or_else(|_| "[]".to_string()))
+            .bind(file_id as i64)
+            .execute(&self.pool)
+            .await
+            .context("Не удалось сохранить audio_tracks")?;
+
+        Ok(())
+    }
+
     /// Проставляет `field_order` и сбрасывает кэш карт сегментов этого файла: если файл
     /// оказался чересстрочным, его профиль меняется с copy на перекодирование, и старая
     /// карта профилю больше не подходит.
@@ -1036,11 +1073,10 @@ fn row_to_media_file(row: sqlx::sqlite::SqliteRow) -> MediaFile {
 
 /// Дорожки хранятся одной JSON-колонкой: их читают только целиком, для выбора в плеере,
 /// и по ним никогда не ищут — отдельная таблица не окупается.
+/// Пустой список пишется как `"[]"`, а не NULL: NULL означает «дорожки ещё не читали»
+/// и служит очередью бэкфилла — файл без звука не должен попадать в неё каждый старт.
 fn audio_tracks_to_json(tracks: &[AudioTrack]) -> Option<String> {
-    if tracks.is_empty() {
-        return None;
-    }
-    serde_json::to_string(tracks).ok()
+    Some(serde_json::to_string(tracks).unwrap_or_else(|_| "[]".to_string()))
 }
 
 /// Битый или отсутствующий JSON — пустой список: сервер трактует его как «одна дорожка 0».

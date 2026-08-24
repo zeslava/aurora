@@ -754,7 +754,59 @@ async fn perform_scan(state: &AppState, job_id: Option<Uuid>) -> Result<u64, Str
 /// Публичная точка входа для догрузки метаданных при старте сервера
 pub async fn enrich_pending_metadata(state: &AppState) {
     backfill_field_order(state).await;
+    backfill_audio_tracks(state).await;
     enrich_tmdb(state).await;
+}
+
+/// Дозаполняет список аудиодорожек у файлов, попавших в БД до появления колонки.
+///
+/// Нужен ровно по той же причине, что и [`backfill_field_order`]: повторный скан известные
+/// файлы не перечитывает, поэтому у всей уже собранной библиотеки список остался бы пустым —
+/// и плеер не показал бы выбор перевода ни у одного фильма.
+async fn backfill_audio_tracks(state: &AppState) -> u64 {
+    let mut filled = 0u64;
+
+    loop {
+        let pending = match state.db.get_files_pending_audio_tracks(50).await {
+            Ok(files) if files.is_empty() => break,
+            Ok(files) => files,
+            Err(e) => {
+                tracing::warn!("Не удалось получить очередь audio_tracks: {}", e);
+                break;
+            }
+        };
+
+        for (file_id, path) in pending {
+            // ffprobe — блокирующий вызов, в рантайме tokio ему не место.
+            let probed = tokio::task::spawn_blocking(move || extract_metadata(&path)).await;
+
+            // Пустой список у нечитаемого файла — это «пробовали»: иначе один битый файл
+            // крутил бы бэкфилл вечно.
+            let tracks = match probed {
+                Ok(Ok(meta)) => meta.audio_tracks,
+                Ok(Err(e)) => {
+                    tracing::warn!("audio_tracks для файла {}: {}", file_id, e);
+                    Vec::new()
+                }
+                Err(e) => {
+                    tracing::warn!("Задача ffprobe для файла {} упала: {}", file_id, e);
+                    Vec::new()
+                }
+            };
+
+            if let Err(e) = state.db.set_audio_tracks(file_id, &tracks).await {
+                tracing::warn!("Не удалось сохранить audio_tracks файла {}: {}", file_id, e);
+                // Запись осталась NULL — следующий батч выберет её снова и уйдёт в петлю.
+                return filled;
+            }
+            filled += 1;
+        }
+    }
+
+    if filled > 0 {
+        tracing::info!("audio_tracks: прочитаны у {} файлов", filled);
+    }
+    filled
 }
 
 /// Дозаполняет `field_order` у файлов, попавших в БД до появления этого признака.
@@ -2175,6 +2227,47 @@ mod tests {
 
         // Второй проход не должен находить работу — иначе ffprobe гонялся бы каждый старт.
         assert_eq!(backfill_field_order(&state).await, 0);
+    }
+
+    /// Регрессия: без бэкфилла у собранной до миграции 009 библиотеки список дорожек
+    /// остался бы пустым, и плеер не показал бы выбор перевода ни у одного фильма.
+    #[tokio::test]
+    async fn backfill_fills_audio_tracks_for_existing_files() {
+        if !ffmpeg_available() {
+            eprintln!("SKIP: ffmpeg/ffprobe недоступны");
+            return;
+        }
+        let shape = crate::testkit::Shape::matrix()
+            .into_iter()
+            .find(|s| !s.extra_audio.is_empty())
+            .expect("в матрице нет многодорожечной формы");
+        let tmp = tempfile::tempdir().unwrap();
+        let file = shape.build(tmp.path());
+        let (state, _) = state_for_shape(&file, &shape).await;
+
+        // Так выглядит запись, сделанная до миграции 009.
+        sqlx::query("UPDATE media_files SET audio_tracks = NULL")
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(backfill_audio_tracks(&state).await, 1);
+
+        let file = state
+            .db
+            .resolve_media_file(&state.db.get_media_items(None).await.unwrap()[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            file.audio_tracks.len(),
+            shape.extra_audio.len() + 1,
+            "бэкфилл должен прочитать все дорожки: {:?}",
+            file.audio_tracks
+        );
+
+        // Второй проход не должен находить работу — иначе ffprobe гонялся бы каждый старт.
+        assert_eq!(backfill_audio_tracks(&state).await, 0);
     }
 
     /// Чересстрочный H.264 проходит белый список кодеков и без этой проверки уходил бы
