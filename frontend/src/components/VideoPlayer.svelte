@@ -1,6 +1,6 @@
 <script lang="ts">
   import Hls from 'hls.js';
-  import { untrack, type Snippet } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import { apiClient } from '../api/client';
   import type { AudioTrack } from '../types';
 
@@ -276,6 +276,49 @@
       // Приватный режим/выключенное хранилище — выбор просто не переживёт перезагрузку.
     }
     audioMenuOpen = false;
+    audioMenuToggleEl?.focus();
+  };
+
+  let audioMenuEl = $state<HTMLUListElement | undefined>(undefined);
+  let audioMenuToggleEl = $state<HTMLButtonElement | undefined>(undefined);
+
+  // На ТВ список открывается «с текущей дорожки»: без явного фокуса D-pad начинает
+  // ходить от кнопки, и первое нажатие вниз прыгает в середину списка.
+  const toggleAudioMenu = async () => {
+    audioMenuOpen = !audioMenuOpen;
+    if (!audioMenuOpen) return;
+    await tick();
+    const active = audioMenuEl?.querySelector<HTMLButtonElement>('.audio-menu__item--active');
+    (active ?? audioMenuEl?.querySelector<HTMLButtonElement>('.audio-menu__item'))?.focus();
+  };
+
+  // Пока список открыт, стрелки ходят только по нему: глобальная spatial-навигация
+  // считает соседей по геометрии и с середины списка уводит фокус на кнопки плеера.
+  const onAudioMenuKeydown = (e: KeyboardEvent) => {
+    if (e.keyCode === 461 || e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      audioMenuOpen = false;
+      audioMenuToggleEl?.focus();
+      return;
+    }
+
+    const step = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+    if (step === 0) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') e.stopPropagation();
+      return;
+    }
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const items = Array.from(
+      audioMenuEl?.querySelectorAll<HTMLButtonElement>('.audio-menu__item') ?? []
+    );
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = items[Math.min(items.length - 1, Math.max(0, current + step))];
+    next?.focus();
+    next?.scrollIntoView({ block: 'nearest' });
   };
 
   // Последняя известная позиция: при размонтировании hls.destroy()/detachMedia
@@ -966,7 +1009,8 @@
         {#if audioTracks.length > 1}
           <div class="audio-menu">
             {#if audioMenuOpen}
-              <ul class="audio-menu__list">
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <ul class="audio-menu__list" bind:this={audioMenuEl} onkeydown={onAudioMenuKeydown}>
                 {#each audioTracks as track (track.index)}
                   <li>
                     <button
@@ -981,14 +1025,16 @@
               </ul>
             {/if}
             <button
-              onclick={() => (audioMenuOpen = !audioMenuOpen)}
-              class="btn--icon"
+              onclick={toggleAudioMenu}
+              bind:this={audioMenuToggleEl}
+              class="btn audio-menu__toggle"
               title="Аудиодорожка"
               aria-expanded={audioMenuOpen}
             >
               <svg class="icon icon--md" fill="currentColor" viewBox="0 -960 960 960">
                 <path d="M280-360q-17 0-28.5-11.5T240-400v-160q0-17 11.5-28.5T280-600h100l114-114q19-19 42.5-8.5T560-686v412q0 26-23.5 36.5T494-246L380-360H280Zm400-120q0 32-14 60t-38 45q-9 5-18.5 0t-9.5-16v-179q0-11 9.5-16t18.5 0q24 18 38 46t14 60Z" />
               </svg>
+              <span>Аудио {audioIndex + 1}</span>
             </button>
           </div>
         {/if}
@@ -1143,13 +1189,19 @@
     position: relative;
   }
 
+  /* Кнопка подписана словом: одна иконка динамика читается как громкость, а на
+     телевизоре до неё ещё надо доехать пультом — цель должна быть крупной. */
+  .audio-menu__toggle {
+    font-size: var(--text-lg);
+  }
+
   .audio-menu__list {
     position: absolute;
     right: 0;
     bottom: calc(100% + var(--space-2));
     z-index: var(--z-raised);
-    min-width: 16rem;
-    max-height: 40vh;
+    min-width: 20rem;
+    max-height: 50vh;
     overflow-y: auto;
     padding: var(--space-2);
     border-radius: var(--radius);
@@ -1159,18 +1211,18 @@
 
   .audio-menu__item {
     width: 100%;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-4);
     border: 0;
     border-radius: var(--radius);
     background: none;
     color: inherit;
-    font-size: var(--text-sm);
+    font-size: var(--text-base);
     text-align: left;
     cursor: pointer;
   }
 
   .audio-menu__item:hover,
-  .audio-menu__item:focus-visible {
+  .audio-menu__item:focus {
     background-color: var(--surface-3);
   }
 

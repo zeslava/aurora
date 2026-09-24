@@ -2,6 +2,7 @@ use crate::config::Config;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 
 /// Клаймы JWT токена
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +62,15 @@ pub fn verify_token(token: &str, config: &Config) -> Result<Claims, jsonwebtoken
     )?;
 
     Ok(token_data.claims)
+}
+
+/// Адрес из локальной сети. IPv4-mapped IPv6 (`::ffff:192.168.x.x`) приводим к IPv4,
+/// иначе при dual-stack сокете LAN-клиенты не распознаются
+pub fn is_lan(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
 }
 
 /// Извлекает токен из заголовка Authorization

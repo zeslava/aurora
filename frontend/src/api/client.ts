@@ -143,6 +143,13 @@ class ApiClient {
     return response.data;
   }
 
+  // Вход без пароля из локальной сети; бросает 403, если сервер не доверяет адресу
+  async lanLogin(): Promise<AuthResponse> {
+    const response = await this.client.post<AuthResponse>('/api/auth/lan');
+    this.setToken(response.data.token);
+    return response.data;
+  }
+
   // Сопряжение устройств (pairing-код)
   async pairStart(): Promise<{ pairing_id: string; code: string }> {
     const response = await this.client.post<{ pairing_id: string; code: string }>('/api/pair/start');

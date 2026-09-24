@@ -727,6 +727,16 @@ impl Database {
         }
     }
 
+    /// Первый зарегистрированный пользователь (id, username) — под ним входят из LAN
+    pub async fn get_first_user(&self) -> Result<Option<(u64, String)>> {
+        let row = sqlx::query("SELECT id, username FROM users ORDER BY id LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await
+            .context("Не удалось получить пользователя")?;
+
+        Ok(row.map(|row| (row.get::<i64, _>(0) as u64, row.get::<String, _>(1))))
+    }
+
     /// Получает медиа элемент по ID
     pub async fn get_media_item_by_id(&self, id: &str) -> Result<Option<MediaItem>> {
         let row = sqlx::query(&format!(

@@ -18,6 +18,8 @@ pub struct Config {
     pub tmdb_language: String,
     /// Директория для кэша (обложки и прочее)
     pub cache_dir: PathBuf,
+    /// Пароль обязателен всегда; иначе клиенты из локальной сети входят без него
+    pub strict_auth: bool,
 }
 
 impl Config {
@@ -69,6 +71,10 @@ impl Config {
         let cache_dir =
             PathBuf::from(std::env::var("CACHE_DIR").unwrap_or_else(|_| "./cache".to_string()));
 
+        let strict_auth = std::env::var("STRICT_AUTH")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+
         Ok(Config {
             port,
             media_paths,
@@ -77,6 +83,7 @@ impl Config {
             tmdb_api_key,
             tmdb_language,
             cache_dir,
+            strict_auth,
         })
     }
 }

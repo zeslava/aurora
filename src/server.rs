@@ -11,7 +11,7 @@ use crate::transcoder::{AudioTranscoder, HlsManager};
 use axum::{
     Router,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Json, Response},
     routing::{get, patch, post, put},
@@ -20,6 +20,7 @@ use bytes::Bytes;
 use futures::stream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
@@ -146,6 +147,7 @@ pub fn create_router(state: AppState) -> Router {
         // Публичные эндпоинты аутентификации
         .route("/api/auth/register", post(register_handler))
         .route("/api/auth/login", post(login_handler))
+        .route("/api/auth/lan", post(lan_login_handler))
         // Сопряжение устройств без клавиатуры (pairing-код)
         .route("/api/pair/start", post(pair_start_handler))
         .route("/api/pair/confirm", post(pair_confirm_handler))
@@ -372,6 +374,39 @@ async fn login_handler(
         token,
         user_id,
         username: payload.username,
+    }))
+}
+
+/// Вход без пароля для клиентов из локальной сети — под первым пользователем.
+/// За reverse proxy на том же хосте все клиенты выглядят как loopback,
+/// поэтому там режим выключают через STRICT_AUTH=true
+async fn lan_login_handler(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<Json<AuthResponse>, StatusCode> {
+    if state.config.strict_auth || !auth::is_lan(addr.ip()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let (user_id, username) = state
+        .db
+        .get_first_user()
+        .await
+        .map_err(|e| {
+            tracing::error!("Ошибка при получении пользователя: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::FORBIDDEN)?;
+
+    let token = create_token(user_id, &username, &state.config).map_err(|e| {
+        tracing::error!("Ошибка создания токена: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(AuthResponse {
+        token,
+        user_id,
+        username,
     }))
 }
 
@@ -2570,6 +2605,7 @@ mod tests {
             tmdb_api_key: None,
             tmdb_language: "ru-RU".into(),
             cache_dir: PathBuf::from("./cache"),
+            strict_auth: true,
         };
         let state = AppState {
             config: Arc::new(config),

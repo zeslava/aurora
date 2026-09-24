@@ -24,6 +24,15 @@ class Auth {
     this.apply(await apiClient.login(data));
   }
 
+  async tryLan(): Promise<boolean> {
+    try {
+      this.apply(await apiClient.lanLogin());
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   loginWithResponse(response: AuthResponse) {
     this.apply(response);
   }

@@ -139,6 +139,9 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     info!("Сервер запущен на http://{}", addr);
+    if !config.strict_auth {
+        info!("Вход без пароля из локальной сети включён (STRICT_AUTH=true — выключить)");
+    }
 
     // Обработка graceful shutdown
     let shutdown_signal = async {
@@ -149,7 +152,11 @@ async fn main() -> Result<()> {
     };
 
     // Запуск сервера
-    axum::serve(listener, app)
+    // ConnectInfo нужен для входа без пароля из LAN
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal)
         .await
         .map_err(|e| anyhow::anyhow!("Ошибка сервера: {}", e))?;
