@@ -17,3 +17,8 @@ cache
 graphify-out/.graphify_root
 graphify-out/.graphify_python
 cfgy.yaml
+
+# локальные инструменты и артефакты сборки
+/build
+graphify-out/
+.serena/
