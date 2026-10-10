@@ -270,10 +270,21 @@ fn request_token(req: &axum::extract::Request) -> Option<String> {
 
 /// За reverse proxy на том же хосте все клиенты выглядят как loopback,
 /// поэтому там доверие к LAN выключают через STRICT_AUTH=true.
+/// Страховка на случай, если не выключили: запрос с заголовками прокси не доверенный —
+/// подделка такого заголовка только ужесточает проверку, поэтому верить им не нужно.
 /// Cross-origin запрос не доверенный даже из LAN: иначе любой сайт, открытый в домашнем
 /// браузере, управлял бы сервером от имени первого пользователя
 fn trusted_lan(config: &Config, peer: Option<SocketAddr>, headers: &HeaderMap) -> bool {
-    !config.strict_auth && peer.is_some_and(|addr| auth::is_lan(addr.ip())) && same_origin(headers)
+    !config.strict_auth
+        && peer.is_some_and(|addr| auth::is_lan(addr.ip()))
+        && !proxied(headers)
+        && same_origin(headers)
+}
+
+fn proxied(headers: &HeaderMap) -> bool {
+    ["x-forwarded-for", "x-real-ip", "forwarded"]
+        .iter()
+        .any(|name| headers.contains_key(*name))
 }
 
 /// Без `Origin` — навигация, `<video>`/`<img>` или не браузер; иначе хост из `Origin`
@@ -1473,18 +1484,25 @@ async fn stream_handler(
     // Отдаём запрошенный диапазон целиком (при `bytes=N-` — до конца файла).
     // Поток читается кусками по 64 КБ, поэтому память не расходуется на весь диапазон,
     // а браузер тянет данные по одному соединению без периодических дозапросов.
-    let (start, end) = if let Some(range_header) = headers.get("range") {
-        let range_str = range_header.to_str().unwrap_or("");
-        match parse_range(range_str, file_size) {
-            Some(range) => range,
-            // Невалидный Range — отдаём весь файл
-            None => (0, file_size - 1),
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|h| h.to_str().ok())
+        .map_or(ByteRange::Whole, |r| parse_range(r, file_size));
+    // Конец исключительный: у пустого файла включительного конца нет
+    let (start, end_excl) = match range {
+        ByteRange::Part(start, end) => (start, end + 1),
+        ByteRange::Whole => (0, file_size),
+        ByteRange::Unsatisfiable => {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
+                .body(Body::empty())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
         }
-    } else {
-        (0, file_size - 1)
     };
+    let partial = start > 0 || end_excl < file_size;
 
-    let content_length = end - start + 1;
+    let content_length = end_excl - start;
 
     // Перемещаемся к нужной позиции в файле
     let mut file = file;
@@ -1524,7 +1542,7 @@ async fn stream_handler(
 
     // Формируем ответ
     let mut response = Response::builder()
-        .status(if start > 0 || end < file_size - 1 {
+        .status(if partial {
             StatusCode::PARTIAL_CONTENT
         } else {
             StatusCode::OK
@@ -1533,10 +1551,10 @@ async fn stream_handler(
         .header(header::CONTENT_LENGTH, content_length)
         .header(header::ACCEPT_RANGES, "bytes");
 
-    if start > 0 || end < file_size - 1 {
+    if partial {
         response = response.header(
             header::CONTENT_RANGE,
-            format!("bytes {}-{}/{}", start, end, file_size),
+            format!("bytes {}-{}/{}", start, end_excl - 1, file_size),
         );
     }
 
@@ -1600,10 +1618,10 @@ async fn stream_transcoded_handler(
             .len();
 
         match parse_range(range_str, file_size) {
-            Some((start_byte, _)) => {
+            ByteRange::Part(start_byte, _) => {
                 range_start_seconds(start_byte, file_size, media_file.duration)
             }
-            None => 0,
+            ByteRange::Whole | ByteRange::Unsatisfiable => 0,
         }
     } else {
         0
@@ -2013,30 +2031,56 @@ fn range_start_seconds(start_byte: u64, file_size: u64, duration: Option<u64>) -
 }
 
 /// Парсит Range заголовок
-fn parse_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
-    let range_str = range_str.strip_prefix("bytes=")?;
-    let parts: Vec<&str> = range_str.split('-').collect();
-    if parts.len() != 2 {
-        return None;
-    }
+#[derive(Debug, PartialEq)]
+enum ByteRange {
+    /// Заголовок не разобран — по RFC 9110 его игнорируют и отдают файл целиком
+    Whole,
+    /// Включительные границы
+    Part(u64, u64),
+    /// Синтаксически верный, но вне файла → 416
+    Unsatisfiable,
+}
 
-    let start = if parts[0].is_empty() {
-        0
-    } else {
-        parts[0].parse::<u64>().ok()?
+/// Разбор одиночного `Range: bytes=…` по RFC 9110: конец за пределами файла урезается,
+/// `bytes=-N` — последние N байт
+fn parse_range(range_str: &str, file_size: u64) -> ByteRange {
+    let Some((first, last)) = range_str
+        .strip_prefix("bytes=")
+        .and_then(|r| r.split_once('-'))
+    else {
+        return ByteRange::Whole;
     };
+    let parse = |s: &str| s.trim().parse::<u64>().ok();
 
-    let end = if parts[1].is_empty() {
-        file_size - 1
-    } else {
-        parts[1].parse::<u64>().ok()?
-    };
-
-    if start > end || end >= file_size {
-        return None;
+    match (first.trim().is_empty(), last.trim().is_empty()) {
+        (true, true) => ByteRange::Whole,
+        (true, false) => match parse(last) {
+            None => ByteRange::Whole,
+            Some(0) => ByteRange::Unsatisfiable,
+            Some(_) if file_size == 0 => ByteRange::Unsatisfiable,
+            Some(n) => ByteRange::Part(file_size.saturating_sub(n), file_size - 1),
+        },
+        (false, open_end) => {
+            let Some(start) = parse(first) else {
+                return ByteRange::Whole;
+            };
+            let end = if open_end {
+                u64::MAX
+            } else {
+                match parse(last) {
+                    Some(end) => end,
+                    None => return ByteRange::Whole,
+                }
+            };
+            if start > end {
+                ByteRange::Whole
+            } else if start >= file_size {
+                ByteRange::Unsatisfiable
+            } else {
+                ByteRange::Part(start, end.min(file_size - 1))
+            }
+        }
     }
-
-    Some((start, end))
 }
 
 /// Определяет MIME тип по расширению файла
@@ -2498,40 +2542,48 @@ mod tests {
 
     #[test]
     fn parse_range_open_ended() {
-        assert_eq!(parse_range("bytes=0-", 1000), Some((0, 999)));
+        assert_eq!(parse_range("bytes=0-", 1000), ByteRange::Part(0, 999));
     }
 
     #[test]
     fn parse_range_explicit() {
-        assert_eq!(parse_range("bytes=100-200", 1000), Some((100, 200)));
+        assert_eq!(parse_range("bytes=100-200", 1000), ByteRange::Part(100, 200));
     }
 
     #[test]
     fn parse_range_from_middle_to_end() {
-        assert_eq!(parse_range("bytes=500-", 1000), Some((500, 999)));
+        assert_eq!(parse_range("bytes=500-", 1000), ByteRange::Part(500, 999));
     }
 
     #[test]
-    fn parse_range_empty_start_means_zero() {
-        // Наш парсер трактует пустой старт как 0 (не как suffix-range).
-        assert_eq!(parse_range("bytes=-200", 1000), Some((0, 200)));
+    fn parse_range_suffix_is_last_bytes() {
+        assert_eq!(parse_range("bytes=-200", 1000), ByteRange::Part(800, 999));
+        assert_eq!(parse_range("bytes=-2000", 1000), ByteRange::Part(0, 999));
+        assert_eq!(parse_range("bytes=-0", 1000), ByteRange::Unsatisfiable);
     }
 
     #[test]
-    fn parse_range_start_after_end_is_invalid() {
-        assert_eq!(parse_range("bytes=800-200", 1000), None);
+    fn parse_range_start_after_end_is_ignored() {
+        assert_eq!(parse_range("bytes=800-200", 1000), ByteRange::Whole);
     }
 
     #[test]
-    fn parse_range_end_beyond_size_is_invalid() {
-        assert_eq!(parse_range("bytes=0-2000", 1000), None);
+    fn parse_range_end_beyond_size_is_clamped() {
+        assert_eq!(parse_range("bytes=0-2000", 1000), ByteRange::Part(0, 999));
     }
 
     #[test]
-    fn parse_range_garbage_is_none() {
-        assert_eq!(parse_range("bytes=abc", 1000), None);
-        assert_eq!(parse_range("100-200", 1000), None); // нет префикса bytes=
-        assert_eq!(parse_range("bytes=1-2-3", 1000), None);
+    fn parse_range_start_beyond_size_is_unsatisfiable() {
+        assert_eq!(parse_range("bytes=1000-", 1000), ByteRange::Unsatisfiable);
+        assert_eq!(parse_range("bytes=0-", 0), ByteRange::Unsatisfiable);
+        assert_eq!(parse_range("bytes=-100", 0), ByteRange::Unsatisfiable);
+    }
+
+    #[test]
+    fn parse_range_garbage_is_ignored() {
+        assert_eq!(parse_range("bytes=abc", 1000), ByteRange::Whole);
+        assert_eq!(parse_range("100-200", 1000), ByteRange::Whole); // нет префикса bytes=
+        assert_eq!(parse_range("bytes=1-2-3", 1000), ByteRange::Whole);
     }
 
     // --- Слой 1b: range_start_seconds ---
@@ -2747,6 +2799,7 @@ mod tests {
             tmdb_language: "ru-RU".into(),
             cache_dir: PathBuf::from("./cache"),
             strict_auth: true,
+            ffmpeg_max_runs: crate::transcoder::DEFAULT_MAX_RUNS,
             jwt_secret: "test-secret".into(),
         };
         let state = AppState {
@@ -3439,6 +3492,26 @@ mod tests {
             auth_status(&state, "127.0.0.1:5000", None).await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn proxied_loopback_client_needs_token() {
+        let state = auth_state(false).await;
+        for name in ["x-forwarded-for", "x-real-ip", "forwarded"] {
+            let mut req = Request::builder()
+                .uri("/api/libraries")
+                .header(name, "8.8.8.8")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo("127.0.0.1:5000".parse::<SocketAddr>().unwrap()));
+            let status = create_router(state.clone())
+                .oneshot(req)
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{name}");
+        }
     }
 
     #[tokio::test]

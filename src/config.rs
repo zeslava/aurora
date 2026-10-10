@@ -20,6 +20,8 @@ pub struct Config {
     pub cache_dir: PathBuf,
     /// Пароль обязателен всегда; иначе клиенты из локальной сети входят без него
     pub strict_auth: bool,
+    /// Сколько HLS-ранов ffmpeg может идти одновременно на весь сервер
+    pub ffmpeg_max_runs: usize,
     /// Ключ подписи JWT: JWT_SECRET или сгенерированный и сохранённый рядом с БД
     pub jwt_secret: String,
 }
@@ -77,6 +79,11 @@ impl Config {
             .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
             .unwrap_or(false);
 
+        let ffmpeg_max_runs = std::env::var("FFMPEG_MAX_RUNS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(crate::transcoder::DEFAULT_MAX_RUNS);
+
         let jwt_secret = match std::env::var("JWT_SECRET") {
             Ok(s) if !s.trim().is_empty() => s,
             _ => load_or_create_jwt_secret(&database_url)?,
@@ -91,6 +98,7 @@ impl Config {
             tmdb_language,
             cache_dir,
             strict_auth,
+            ffmpeg_max_runs,
             jwt_secret,
         })
     }

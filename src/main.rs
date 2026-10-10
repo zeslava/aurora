@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
 
     // Создание состояния приложения
     let config_arc = Arc::new(config.clone());
-    let hls = HlsManager::new();
+    let hls = HlsManager::new(config.ffmpeg_max_runs);
 
     // Периодическая очистка простаивающих HLS-сессий (temp-директории с сегментами)
     let hls_cleanup = hls.clone();

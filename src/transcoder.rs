@@ -148,10 +148,9 @@ impl Stream for AudioTranscoder {
 
 impl Drop for AudioTranscoder {
     fn drop(&mut self) {
-        // Убиваем процесс при уничтожении
+        // `kill()` у tokio — future, в Drop её некому опросить; start_kill шлёт сигнал сразу
         if let Ok(None) = self.process.try_wait() {
-            let _ = self.process.kill();
-            let _ = self.process.wait();
+            let _ = self.process.start_kill();
         }
     }
 }
@@ -162,6 +161,8 @@ const LOOKAHEAD_SEGMENTS: usize = 6;
 /// Не более стольких параллельных ffmpeg-ранов на файл — иначе перемотки туда-сюда
 /// плодят процессы без ограничения.
 const MAX_RUNS_PER_FILE: usize = 2;
+/// Лимит ранов на весь сервер по умолчанию (FFMPEG_MAX_RUNS).
+pub const DEFAULT_MAX_RUNS: usize = 4;
 /// Сколько ждать появления сегмента, прежде чем считать генерацию зависшей.
 const SEGMENT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -242,11 +243,17 @@ pub struct HlsManager {
     /// файла, поэтому при общем `/tmp` прогон подхватывал бы сегменты, нарезанные предыдущей
     /// версией кода, и проверял бы не то, что собрал сейчас.
     root: PathBuf,
+    /// Сколько ранов может жить одновременно на всех файлах; сверх лимита новый ран
+    /// вытесняет раны файла, к которому дольше всех не обращались.
+    max_runs: usize,
 }
 
 impl HlsManager {
-    pub fn new() -> Self {
-        Self::with_root(std::env::temp_dir())
+    pub fn new(max_runs: usize) -> Self {
+        Self {
+            max_runs: max_runs.max(1),
+            ..Self::with_root(std::env::temp_dir())
+        }
     }
 
     /// Корень файлового кэша — нужен тестам, чтобы заглянуть, что ран реально записал.
@@ -259,6 +266,7 @@ impl HlsManager {
         Self {
             caches: Arc::new(AsyncMutex::new(HashMap::new())),
             root,
+            max_runs: DEFAULT_MAX_RUNS,
         }
     }
 
@@ -349,6 +357,7 @@ impl HlsManager {
             return Ok(data);
         }
 
+        let mut started_run = false;
         let failed = {
             let mut guard = cache.lock().await;
             guard.last_access = Instant::now();
@@ -428,9 +437,15 @@ impl HlsManager {
                     task,
                     failed: failed.clone(),
                 });
+                started_run = true;
                 failed
             }
         };
+
+        // Вне блокировки своего кэша: порядок «caches → cache» тот же, что в cleanup_idle
+        if started_run {
+            self.enforce_run_limit(cache).await;
+        }
 
         let deadline = Instant::now() + SEGMENT_WAIT_TIMEOUT;
         loop {
@@ -462,6 +477,43 @@ impl HlsManager {
         }
     }
 
+    /// Глушит раны давно не запрашивавшихся файлов, пока живых ранов не станет не больше
+    /// `max_runs`. Раны брошенного просмотра идут до конца файла, пока кэш не снесёт
+    /// cleanup_idle, — без вытеснения они занимали бы CPU вместо тех, кого смотрят сейчас.
+    /// Ожидающим вытесненного рана сразу отдаётся ошибка, а не таймаут.
+    async fn enforce_run_limit(&self, current: &Arc<AsyncMutex<FileCache>>) {
+        let caches = self.caches.lock().await;
+        let mut candidates = Vec::new();
+        let mut live = 0;
+        for cache in caches.values() {
+            let mut guard = cache.lock().await;
+            guard.runs.retain(|r| !r.task.is_finished());
+            live += guard.runs.len();
+            if !guard.runs.is_empty() && !Arc::ptr_eq(cache, current) {
+                candidates.push((guard.last_access, cache.clone()));
+            }
+        }
+        candidates.sort_by_key(|(last_access, _)| *last_access);
+
+        for (_, cache) in candidates {
+            if live <= self.max_runs {
+                break;
+            }
+            let mut guard = cache.lock().await;
+            warn!(
+                "HLS: лимит ранов на сервер ({}) — глушу {} ран(ов) в {:?}",
+                self.max_runs,
+                guard.runs.len(),
+                guard.dir
+            );
+            live -= guard.runs.len();
+            for run in guard.runs.drain(..) {
+                run.task.abort();
+                *run.failed.lock().unwrap() = Some("ран вытеснен лимитом ffmpeg".to_string());
+            }
+        }
+    }
+
     /// Удаляет кэши, простаивающие дольше `ttl` (глуша живые раны), вместе с их
     /// temp-директориями.
     pub async fn cleanup_idle(&self, ttl: Duration) {
@@ -489,7 +541,7 @@ impl HlsManager {
 
 impl Default for HlsManager {
     fn default() -> Self {
-        Self::new()
+        Self::new(DEFAULT_MAX_RUNS)
     }
 }
 
@@ -847,5 +899,54 @@ impl Drop for KillOnDropChild {
         if let Ok(None) = self.0.try_wait() {
             let _ = self.0.start_kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROFILE: segments::StreamProfile = segments::StreamProfile {
+        transcode_video: false,
+        transcode_audio: false,
+        deinterlace: false,
+        audio_index: 0,
+    };
+
+    async fn add_run(cache: &Arc<AsyncMutex<FileCache>>) -> Arc<StdMutex<Option<String>>> {
+        let failed = Arc::new(StdMutex::new(None));
+        let mut guard = cache.lock().await;
+        guard.last_access = Instant::now();
+        guard.runs.push(Run {
+            start_index: 0,
+            task: tokio::spawn(std::future::pending()),
+            failed: failed.clone(),
+        });
+        failed
+    }
+
+    #[tokio::test]
+    async fn run_limit_evicts_least_recently_used_file() {
+        let root = std::env::temp_dir().join(format!("aurora-limit-{}", std::process::id()));
+        let hls = HlsManager {
+            max_runs: 2,
+            ..HlsManager::with_root(root.clone())
+        };
+        let a = hls.cache_for(1, Path::new("/a.mkv"), PROFILE).await;
+        let b = hls.cache_for(2, Path::new("/b.mkv"), PROFILE).await;
+        let c = hls.cache_for(3, Path::new("/c.mkv"), PROFILE).await;
+
+        let failed_a = add_run(&a).await;
+        let failed_b = add_run(&b).await;
+        add_run(&c).await;
+        hls.enforce_run_limit(&c).await;
+
+        assert!(a.lock().await.runs.is_empty(), "самый старый файл вытеснен");
+        assert!(failed_a.lock().unwrap().is_some(), "ожидающие получают ошибку");
+        assert_eq!(b.lock().await.runs.len(), 1);
+        assert!(failed_b.lock().unwrap().is_none());
+        assert_eq!(c.lock().await.runs.len(), 1, "свой ран не трогаем");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
