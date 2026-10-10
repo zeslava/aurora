@@ -15,6 +15,7 @@
 
   let media = $state<MediaItem[]>([]);
   let home = $state<HomeResponse | null>(null);
+  let homeLoaded = $state(false);
   let progressMap = $state<Record<string, PlaybackState>>({});
   let loading = $state(true);
   let filter = $state<FilterType>('all');
@@ -37,6 +38,8 @@
       home = await apiClient.getHome();
     } catch (error) {
       console.error('Ошибка загрузки главного экрана:', error);
+    } finally {
+      homeLoaded = true;
     }
   };
 
@@ -126,13 +129,17 @@
   // Главный экран показываем только без фильтра
   let showHome = $derived(filter === 'all' && !!home);
 
-  // Стартовый фокус — первая плитка «Продолжить просмотр» (для навигации с пульта)
+  // Стартовый фокус — первая плитка «Продолжить просмотр», а без неё — первая карточка медиатеки
+  // (для навигации с пульта). Ждём ответа /home, иначе фокус уйдёт в сетку раньше, чем появится ряд.
   let continueRow = $state<HTMLElement | null>(null);
+  let mediaGrid = $state<HTMLElement | null>(null);
   let initialFocusDone = false;
 
   $effect(() => {
-    if (initialFocusDone || !continueRow) return;
-    const first = continueRow.querySelector<HTMLElement>('button, a[href], [tabindex]:not([tabindex="-1"])');
+    if (initialFocusDone || !homeLoaded) return;
+    const target = continueRow ?? mediaGrid;
+    if (!target) return;
+    const first = target.querySelector<HTMLElement>('button, a[href], [tabindex]:not([tabindex="-1"])');
     if (!first) return;
     initialFocusDone = true;
     first.focus();
@@ -190,7 +197,7 @@
       {#if filteredAndSortedMedia.length === 0}
         <div class="empty">Медиатека пуста. Нажмите «Обновить».</div>
       {:else}
-        <div class="media-grid">
+        <div class="media-grid" bind:this={mediaGrid}>
           {#each filteredAndSortedMedia as item (item.id)}
             <MediaCard media={item} progress={progressMap[item.id]} />
           {/each}
