@@ -234,15 +234,23 @@ class ApiClient {
     return url;
   }
 
+  // <video>, <img> и hls.js заголовок Authorization не шлют — токен идёт в query.
+  // Из домашней сети сервер пускает и без него, снаружи без него будет 401
+  private withToken(url: string): string {
+    const token = this.token || localStorage.getItem('auth_token');
+    if (!token) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+  }
+
   getHlsUrl(id: string, audioIndex = 0): string {
-    return `${this.baseUrl}/api/media/${id}/hls/playlist.m3u8?audio=${audioIndex}`;
+    return this.withToken(`${this.baseUrl}/api/media/${id}/hls/playlist.m3u8?audio=${audioIndex}`);
   }
 
   // Абсолютный URL картинки: бэкенд отдаёт относительный путь, а в упакованном
   // приложении origin чужой — приклеиваем адрес сервера
   getImageUrl(path?: string | null): string | null {
     if (!path) return null;
-    return `${this.baseUrl}${path}`;
+    return this.withToken(`${this.baseUrl}${path}`);
   }
 
   // Перезапросить метаданные TMDB для всей библиотеки

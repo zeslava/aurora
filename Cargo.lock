@@ -86,6 +86,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "mime_guess",
+ "rand 0.8.5",
  "regex",
  "reqwest",
  "rust-embed",

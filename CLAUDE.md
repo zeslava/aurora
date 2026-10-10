@@ -28,7 +28,8 @@ Full stack: `docker compose up --build` (serves everything on `:4000`).
 - `DATABASE_URL` or `DB_PATH` (default `sqlite:./aurora.db`)
 - `MEDIA_PATHS` — comma-separated library directories; movie vs. series is decided by `scanner.rs` from file content patterns, not from the path name, so one root directory is enough
 - `STATIC_DIR` — dev override: if the directory exists, static files are read from disk; otherwise the copy of `frontend/dist` embedded into the binary is served
-- `JWT_SECRET` — **defaults to a hardcoded dev key; must be set in production**
+- `JWT_SECRET` — if unset, generated once and stored in `jwt_secret` next to the SQLite file
+- `STRICT_AUTH` (default `false`) — `false`: LAN clients (private/loopback/link-local IP) need no token and act as the first user; everyone else needs a JWT. `true`: JWT always
 - `LOG_LEVEL`
 - `TMDB_API_KEY` — TMDB v3 key; without it cover art is disabled and the UI falls back to generated placeholders
 - `TMDB_LANGUAGE` (default `ru-RU`)
@@ -64,7 +65,7 @@ Two endpoints:
 - `/api/media/:id/stream` — direct file streaming with HTTP Range support, capped at a 10 MB chunk per request (`MAX_CHUNK_SIZE`); the `:id` may be either a media item or an episode.
 - `/api/media/:id/stream-transcoded` — checks the audio codec; if it's `ac3`/`dts`/`truehd`/`eac3` (not browser-playable) it transcodes via `ffmpeg` in ~120s duration chunks, seeking with `-ss` from a `start` (seconds) query param or a byte-Range converted to seconds. Otherwise it delegates to the plain `stream_handler`. Do not byte-truncate the transcoded stream — it breaks the MP4 container; duration is bounded by ffmpeg `-t`.
 
-Note: `stream*` endpoints are intentionally public (token accepted via query but not verified) so the `<video>` tag can load them; progress endpoints (`/api/media/:id/progress`) do require a valid JWT.
+Auth: every `/api/*` route except `/health`, `/api/auth/*`, `/api/pair/start|poll` goes through the `require_auth` middleware in `server.rs`, which puts `auth::Claims` into request extensions (handlers take `Extension<Claims>`). The token comes from the `Authorization` header or `?token=` (`<video>`/`<img>`/hls.js can't send headers); the HLS playlist handler appends that token to every segment URI. Without a token, a LAN client is let through as the first user unless `STRICT_AUTH=true`.
 
 ### Data model
 

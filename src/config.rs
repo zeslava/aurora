@@ -20,6 +20,8 @@ pub struct Config {
     pub cache_dir: PathBuf,
     /// Пароль обязателен всегда; иначе клиенты из локальной сети входят без него
     pub strict_auth: bool,
+    /// Ключ подписи JWT: JWT_SECRET или сгенерированный и сохранённый рядом с БД
+    pub jwt_secret: String,
 }
 
 impl Config {
@@ -75,6 +77,11 @@ impl Config {
             .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
             .unwrap_or(false);
 
+        let jwt_secret = match std::env::var("JWT_SECRET") {
+            Ok(s) if !s.trim().is_empty() => s,
+            _ => load_or_create_jwt_secret(&database_url)?,
+        };
+
         Ok(Config {
             port,
             media_paths,
@@ -84,6 +91,55 @@ impl Config {
             tmdb_language,
             cache_dir,
             strict_auth,
+            jwt_secret,
         })
     }
+}
+
+/// Секрет живёт в файле `jwt_secret` рядом с SQLite: переживает рестарт (токены
+/// не слетают) и попадает в тот же volume, что и БД. Для in-memory БД — одноразовый.
+fn load_or_create_jwt_secret(database_url: &str) -> Result<String> {
+    let db_path = database_url
+        .trim_start_matches("sqlite:")
+        .trim_start_matches("//")
+        .split('?')
+        .next()
+        .unwrap_or_default();
+
+    let generated = || -> String {
+        rand::random::<[u8; 32]>()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+
+    if db_path.is_empty() || db_path == ":memory:" {
+        return Ok(generated());
+    }
+
+    let dir = std::path::Path::new(db_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let path = dir.join("jwt_secret");
+
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        if !existing.is_empty() {
+            return Ok(existing.to_string());
+        }
+    }
+
+    let secret = generated();
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("Не удалось создать каталог {}", dir.display()))?;
+    std::fs::write(&path, &secret)
+        .with_context(|| format!("Не удалось сохранить {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+    eprintln!("JWT_SECRET не задан — сгенерирован и сохранён в {}", path.display());
+    Ok(secret)
 }

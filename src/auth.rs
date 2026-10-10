@@ -12,10 +12,8 @@ pub struct Claims {
     pub exp: i64,
 }
 
-/// Секретный ключ для JWT (в продакшене должен быть в переменных окружения)
-fn get_secret_key(_config: &Config) -> String {
-    std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "aurora-secret-key-change-in-production".to_string())
+fn get_secret_key(config: &Config) -> &str {
+    &config.jwt_secret
 }
 
 /// Хеширует пароль

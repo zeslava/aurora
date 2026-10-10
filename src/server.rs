@@ -11,7 +11,7 @@ use crate::transcoder::{AudioTranscoder, HlsManager};
 use axum::{
     Router,
     body::Body,
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{ConnectInfo, Extension, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Json, Response},
     routing::{get, patch, post, put},
@@ -141,18 +141,18 @@ pub fn create_router(state: AppState) -> Router {
         .map(PathBuf::from)
         .filter(|p| p.is_dir());
 
-    let router = Router::new()
+    let public = Router::new()
         .route("/health", get(health_handler))
-        .route("/api/metrics", get(metrics_handler))
-        // Публичные эндпоинты аутентификации
         .route("/api/auth/register", post(register_handler))
         .route("/api/auth/login", post(login_handler))
         .route("/api/auth/lan", post(lan_login_handler))
-        // Сопряжение устройств без клавиатуры (pairing-код)
+        // Сопряжение устройств без клавиатуры: ТВ ещё не авторизован
         .route("/api/pair/start", post(pair_start_handler))
+        .route("/api/pair/poll", post(pair_poll_handler));
+
+    let protected = Router::new()
+        .route("/api/metrics", get(metrics_handler))
         .route("/api/pair/confirm", post(pair_confirm_handler))
-        .route("/api/pair/poll", post(pair_poll_handler))
-        // API эндпоинты
         .route("/api/libraries", get(libraries_handler))
         .route("/api/libraries/scan", post(scan_handler))
         .route("/api/scan", post(scan_start_handler))
@@ -173,7 +173,7 @@ pub fn create_router(state: AppState) -> Router {
             get(hls_playlist_handler),
         )
         .route("/api/media/:id/hls/:segment", get(hls_segment_handler))
-        // Обложки публичны (как и стрим): <img> не может слать Authorization
+        // <img> не может слать Authorization — токен приходит в `?token=`
         .route("/api/media/:id/poster", get(poster_handler))
         .route("/api/media/:id/backdrop", get(backdrop_handler))
         .route(
@@ -184,6 +184,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/media/:id/progress", get(get_progress_handler))
         .route("/api/media/:id/progress", put(update_progress_handler))
         .route("/api/series/:id/episodes", get(series_episodes_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ));
+
+    let router = public
+        .merge(protected)
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -202,6 +209,63 @@ pub fn create_router(state: AppState) -> Router {
         ),
         None => router.fallback(crate::static_files::serve),
     }
+}
+
+/// Определяет пользователя запроса и кладёт его `Claims` в extensions.
+/// Валидный токен (заголовок или `?token=` — `<video>`/`<img>` заголовки не шлют) →
+/// его пользователь. Токена нет, но клиент из локальной сети и STRICT_AUTH выключен →
+/// первый пользователь. Невалидный токен — 401 даже из LAN: клиент должен перелогиниться,
+/// а не молча стать другим пользователем.
+async fn require_auth(
+    State(state): State<AppState>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, StatusCode> {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| *addr);
+
+    let claims = match request_token(&req) {
+        Some(token) => {
+            auth::verify_token(&token, &state.config).map_err(|_| StatusCode::UNAUTHORIZED)?
+        }
+        None if trusted_lan(&state.config, peer) => {
+            let (user_id, username) = state
+                .db
+                .get_first_user()
+                .await
+                .map_err(|e| {
+                    tracing::error!("Ошибка при получении пользователя: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .ok_or(StatusCode::UNAUTHORIZED)?;
+            auth::Claims {
+                user_id,
+                username,
+                exp: 0,
+            }
+        }
+        None => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
+}
+
+fn request_token(req: &axum::extract::Request) -> Option<String> {
+    auth::extract_token(req.headers().get(header::AUTHORIZATION)).or_else(|| {
+        Query::<HashMap<String, String>>::try_from_uri(req.uri())
+            .ok()?
+            .0
+            .remove("token")
+    })
+}
+
+/// За reverse proxy на том же хосте все клиенты выглядят как loopback,
+/// поэтому там доверие к LAN выключают через STRICT_AUTH=true
+fn trusted_lan(config: &Config, peer: Option<SocketAddr>) -> bool {
+    !config.strict_auth && peer.is_some_and(|addr| auth::is_lan(addr.ip()))
 }
 
 /// Health check endpoint
@@ -224,8 +288,35 @@ async fn metrics_handler(
 /// Регистрация пользователя
 async fn register_handler(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Первый пользователь регистрируется откуда угодно, дальше — только из доверенной
+    // локальной сети или уже вошедшим пользователем: снаружи аккаунт себе не завести
+    let has_users = state
+        .db
+        .get_first_user()
+        .await
+        .map_err(|e| {
+            tracing::error!("Ошибка при проверке пользователей: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": "Внутренняя ошибка сервера" })),
+            )
+        })?
+        .is_some();
+    let authorized = auth::extract_token(headers.get(header::AUTHORIZATION))
+        .is_some_and(|t| auth::verify_token(&t, &state.config).is_ok());
+    if has_users && !authorized && !trusted_lan(&state.config, Some(addr)) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "message": "Регистрация доступна только из локальной сети"
+            })),
+        ));
+    }
+
     // Валидация имени пользователя
     if payload.username.is_empty() || payload.username.len() < 3 {
         return Err((
@@ -377,14 +468,12 @@ async fn login_handler(
     }))
 }
 
-/// Вход без пароля для клиентов из локальной сети — под первым пользователем.
-/// За reverse proxy на том же хосте все клиенты выглядят как loopback,
-/// поэтому там режим выключают через STRICT_AUTH=true
+/// Вход без пароля для клиентов из локальной сети — под первым пользователем
 async fn lan_login_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<AuthResponse>, StatusCode> {
-    if state.config.strict_auth || !auth::is_lan(addr.ip()) {
+    if !trusted_lan(&state.config, Some(addr)) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -434,21 +523,9 @@ async fn pair_start_handler(State(state): State<AppState>) -> Json<serde_json::V
 /// Авторизованное устройство (телефон/десктоп) подтверждает код с ТВ
 async fn pair_confirm_handler(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<auth::Claims>,
     Json(payload): Json<PairConfirmRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let auth_header = headers.get(header::AUTHORIZATION);
-    let token = auth::extract_token(auth_header).ok_or((
-        StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({ "message": "Требуется авторизация" })),
-    ))?;
-    let claims = auth::verify_token(&token, &state.config).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "message": "Недействительный токен" })),
-        )
-    })?;
-
     let confirmed = state
         .pairing
         .confirm(&payload.code, claims.user_id, &claims.username)
@@ -1262,11 +1339,8 @@ struct HomeResponse {
 /// Главный экран: «Продолжить просмотр» (по текущему пользователю) + «Недавно добавленное».
 async fn home_handler(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(claims): Extension<auth::Claims>,
 ) -> Result<Json<HomeResponse>, StatusCode> {
-    let auth_header = headers.get(header::AUTHORIZATION);
-    let token = auth::extract_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = auth::verify_token(&token, &state.config).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     let continue_watching = state
         .db
@@ -1744,12 +1818,51 @@ async fn hls_playlist_handler(
         map.count()
     );
 
+    let mut playlist = map.to_playlist(profile);
+    if let Some(token) = params.get("token") {
+        playlist = with_token(&playlist, token);
+    }
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
         .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from(map.to_playlist(profile)))
+        .body(Body::from(playlist))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?)
+}
+
+/// Относительные URI сегментов не наследуют query плейлиста, а нативный HLS-плеер
+/// не даёт добавить заголовок — токен дописывается в каждый URI.
+/// URI сегментов и `init.mp4` всегда уже содержат `?` (см. `segments::segment_uri`).
+fn with_token(playlist: &str, token: &str) -> String {
+    let token = urlencoding_component(token);
+    playlist
+        .lines()
+        .map(|line| {
+            if line.starts_with("#EXT-X-MAP:URI=\"") {
+                line.replacen('?', &format!("?token={token}&"), 1)
+            } else if !line.is_empty() && !line.starts_with('#') {
+                format!("{line}&token={token}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// JWT состоит из base64url и точек, но токен пришёл от клиента — экранируем всё прочее,
+/// чтобы он не смог дописать в плейлист свои параметры или строки
+fn urlencoding_component(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// Отдаёт сегмент (или `init.mp4`), генерируя его лениво при первом обращении.
@@ -1901,12 +2014,8 @@ fn get_mime_type(path: &PathBuf) -> &'static str {
 async fn get_progress_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    Extension(claims): Extension<auth::Claims>,
 ) -> Result<Response, StatusCode> {
-    // Извлекаем токен из заголовка
-    let auth_header = headers.get(axum::http::header::AUTHORIZATION);
-    let token = auth::extract_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = auth::verify_token(&token, &state.config).map_err(|_| StatusCode::UNAUTHORIZED)?;
     let user_id = claims.user_id;
 
     // Резолвим файл по id (фильм или эпизод) — прогресс хранится на уровне файла
@@ -1945,13 +2054,9 @@ async fn get_progress_handler(
 async fn update_progress_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
+    Extension(claims): Extension<auth::Claims>,
     Json(payload): Json<ProgressUpdateRequest>,
 ) -> Result<Json<PlaybackState>, StatusCode> {
-    // Извлекаем токен из заголовка
-    let auth_header = headers.get(axum::http::header::AUTHORIZATION);
-    let token = auth::extract_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
-    let claims = auth::verify_token(&token, &state.config).map_err(|_| StatusCode::UNAUTHORIZED)?;
     let user_id = claims.user_id;
 
     // Резолвим файл по id (фильм или эпизод) — прогресс хранится на уровне файла
@@ -1997,12 +2102,8 @@ struct UpdateMediaRequest {
 async fn update_media_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     Json(payload): Json<UpdateMediaRequest>,
 ) -> Result<Json<MediaItem>, StatusCode> {
-    let auth_header = headers.get(axum::http::header::AUTHORIZATION);
-    let token = auth::extract_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
-    auth::verify_token(&token, &state.config).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     let custom_title = payload
         .custom_title
@@ -2606,6 +2707,7 @@ mod tests {
             tmdb_language: "ru-RU".into(),
             cache_dir: PathBuf::from("./cache"),
             strict_auth: true,
+            jwt_secret: "test-secret".into(),
         };
         let state = AppState {
             config: Arc::new(config),
@@ -2642,7 +2744,10 @@ mod tests {
         uri: &str,
         range: Option<&str>,
     ) -> (StatusCode, HeaderMap, Vec<u8>) {
-        let mut builder = Request::builder().uri(uri);
+        let token = create_token(1, "test", &state.config).unwrap();
+        let mut builder = Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
         if let Some(range) = range {
             builder = builder.header(header::RANGE, range);
         }
@@ -3254,5 +3359,77 @@ mod tests {
             });
         }
         out
+    }
+
+    /// Запрос к защищённому эндпоинту с заданным адресом клиента и токеном.
+    /// Адрес кладётся как `ConnectInfo` — так же, как его проставляет `axum::serve`.
+    async fn auth_status(state: &AppState, peer: &str, token: Option<&str>) -> StatusCode {
+        let mut builder = Request::builder().uri("/api/libraries");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+        create_router(state.clone())
+            .oneshot(req)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn auth_state(strict_auth: bool) -> AppState {
+        let (mut state, _) = state_with_movie(std::path::Path::new("/nonexistent.mp4"), "aac").await;
+        state.db.create_user("home", "hash").await.unwrap();
+        let mut config = (*state.config).clone();
+        config.strict_auth = strict_auth;
+        state.config = Arc::new(config);
+        state
+    }
+
+    #[tokio::test]
+    async fn lan_client_needs_no_token_by_default() {
+        let state = auth_state(false).await;
+        assert_eq!(auth_status(&state, "192.168.1.20:5000", None).await, StatusCode::OK);
+        assert_eq!(auth_status(&state, "127.0.0.1:5000", None).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn outside_client_needs_valid_token() {
+        let state = auth_state(false).await;
+        let token = create_token(1, "home", &state.config).unwrap();
+        assert_eq!(auth_status(&state, "8.8.8.8:5000", None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            auth_status(&state, "8.8.8.8:5000", Some("garbage")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(auth_status(&state, "8.8.8.8:5000", Some(&token)).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn strict_auth_requires_token_from_lan() {
+        let state = auth_state(true).await;
+        assert_eq!(
+            auth_status(&state, "192.168.1.20:5000", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_token_is_rejected_even_from_lan() {
+        let state = auth_state(false).await;
+        assert_eq!(
+            auth_status(&state, "192.168.1.20:5000", Some("garbage")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn playlist_token_reaches_every_segment_uri() {
+        let playlist = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4?p=x&a=0\"\n#EXTINF:6.000000,\nsegment00000.m4s?p=x&a=0\n#EXT-X-ENDLIST\n";
+        let out = with_token(playlist, "a.b-c\n#evil");
+        assert!(out.contains("#EXT-X-MAP:URI=\"init.mp4?token=a.b-c%0A%23evil&p=x&a=0\""));
+        assert!(out.contains("\nsegment00000.m4s?p=x&a=0&token=a.b-c%0A%23evil\n"));
+        assert_eq!(out.lines().count(), playlist.lines().count());
     }
 }
