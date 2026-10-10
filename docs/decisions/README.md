@@ -15,3 +15,4 @@
 - [0004 — Слои дизайн-системы и режимы ввода](0004-design-system-layers.md)
 - [0005 — Чересстрочный источник не может идти через `-c:v copy`](0005-interlaced-source-forces-transcode.md)
 - [0006 — Один HLS-движок на всех платформах](0006-single-hls-engine.md)
+- [0008 — webOS-приложение — оболочка, SPA приходит с сервера](0008-webos-shell.md)
