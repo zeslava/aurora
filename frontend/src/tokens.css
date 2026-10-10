@@ -116,6 +116,9 @@
   /* Текст поверх кадра — читается независимо от того, что под ним */
   --shadow-text: 0 2px 12px rgb(0 0 0 / 0.6);
 
+  /* Стрелка <select>: в data-URI нельзя подставить var(), цвет = --gray-400 */
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%239ca3af' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+
   --focus-ring: var(--sky-400);
   --container: 80rem;
 
