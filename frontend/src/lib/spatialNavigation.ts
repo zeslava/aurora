@@ -155,6 +155,8 @@ export const initSpatialNavigation = (onBack?: () => void) => {
     const horizontal = direction === 'left' || direction === 'right';
     // Закрытый select стрелки влево/вправо не использует — с него можно уйти по строке
     if (horizontal && isTextInput(active) && active?.tagName !== 'SELECT') return;
+    // Иначе на краю строки, где фокусу некуда уйти, стрелка листает значения select
+    if (horizontal && active?.tagName === 'SELECT') e.preventDefault();
 
     const focusables = collectFocusable();
     if (focusables.length === 0) return;
