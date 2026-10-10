@@ -80,7 +80,7 @@ tasks:
       - cargo fmt
 
   webos-build:
-    desc: 'Сборка .ipk для webOS (адрес сервера: AURORA_SERVER_URL или ввод в приложении)'
+    desc: 'Сборка .ipk-оболочки для webOS (адрес сервера по умолчанию: AURORA_SERVER_URL, иначе ввод в приложении)'
     cmds:
       - ./scripts/build-webos.sh {{.CLI_ARGS}}
 

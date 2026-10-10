@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aurora</title>
+<!--
+  Оболочка webOS-приложения. Сама SPA приходит с сервера Aurora: здесь только
+  адрес сервера, проверка доступности и переход на него. Так обновление сервера
+  обновляет и ТВ, без переустановки .ipk. См. docs/decisions/0005-webos-shell.md
+-->
+<style>
+  html { font-size: 22px; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: system-ui, sans-serif;
+  }
+  .card { width: 30rem; max-width: 90vw; display: flex; flex-direction: column; gap: 1.25rem; }
+  h1 { margin: 0; font-size: 2.5rem; }
+  p { margin: 0; color: #94a3b8; line-height: 1.4; }
+  .error { color: #fca5a5; }
+  input, button {
+    font: inherit;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    border: 0.125rem solid #334155;
+    background: #1e293b;
+    color: inherit;
+  }
+  button { cursor: pointer; }
+  button.primary { background: #6366f1; border-color: #6366f1; color: #fff; }
+  input:focus, button:focus { outline: 0.2rem solid #a5b4fc; outline-offset: 0.15rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="card" id="connecting" hidden>
+  <h1>Aurora</h1>
+  <p>Подключение к <span id="connecting-url"></span>…</p>
+  <button type="button" id="change">Сменить сервер</button>
+</div>
+
+<form class="card" id="setup" hidden>
+  <h1>Aurora</h1>
+  <p>Укажите адрес сервера</p>
+  <input type="url" id="url" placeholder="http://192.168.1.10:4000">
+  <p class="error" id="error" hidden></p>
+  <button type="submit" class="primary" id="submit">Подключиться</button>
+</form>
+
+<script>
+  // Подставляется build-webos.sh из AURORA_SERVER_URL; пусто — адрес вводится здесь
+  var DEFAULT_URL = '__AURORA_SERVER_URL__'.indexOf('__') === 0 ? '' : '__AURORA_SERVER_URL__';
+  var KEY = 'server_url';
+  // Минимальное время экрана подключения — чтобы успеть нажать «Сменить сервер»
+  var MIN_CONNECTING_MS = 1000;
+  var PING_TIMEOUT_MS = 5000;
+
+  var connecting = document.getElementById('connecting');
+  var setup = document.getElementById('setup');
+  var input = document.getElementById('url');
+  var error = document.getElementById('error');
+  var submit = document.getElementById('submit');
+
+  // Каждая попытка подключения получает номер; «Сменить сервер» его увеличивает,
+  // и опоздавший ответ старой попытки уже ничего не делает
+  var attempt = 0;
+
+  function normalize(url) {
+    return url.trim().replace(/\/+$/, '');
+  }
+
+  function savedUrl() {
+    try { return localStorage.getItem(KEY) || DEFAULT_URL; } catch (e) { return DEFAULT_URL; }
+  }
+
+  function save(url) {
+    try { localStorage.setItem(KEY, url); } catch (e) {}
+  }
+
+  // no-cors: ответ непрозрачный, но успешный fetch значит, что сервер отвечает,
+  // а CORS-заголовки серверу для этого не нужны
+  function ping(url) {
+    var ctrl = new AbortController();
+    var t = setTimeout(function () { ctrl.abort(); }, PING_TIMEOUT_MS);
+    return fetch(url + '/health', { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
+      .then(function () { return true; }, function () { return false; })
+      .then(function (ok) { clearTimeout(t); return ok; });
+  }
+
+  function showSetup(url, message) {
+    attempt++;
+    connecting.hidden = true;
+    setup.hidden = false;
+    input.value = url || 'http://';
+    error.textContent = message || '';
+    error.hidden = !message;
+    submit.disabled = false;
+    submit.textContent = 'Подключиться';
+    input.focus();
+  }
+
+  function connect(url) {
+    var id = ++attempt;
+    setup.hidden = true;
+    connecting.hidden = false;
+    document.getElementById('connecting-url').textContent = url.replace(/^https?:\/\//, '');
+    document.getElementById('change').focus();
+
+    var minDelay = new Promise(function (resolve) { setTimeout(resolve, MIN_CONNECTING_MS); });
+    Promise.all([ping(url), minDelay]).then(function (r) {
+      if (id !== attempt) return;
+      if (r[0]) {
+        location.replace(url + '/');
+      } else {
+        showSetup(url, 'Сервер не отвечает. Проверьте, что он запущен, или укажите новый адрес.');
+      }
+    });
+  }
+
+  document.getElementById('change').addEventListener('click', function () {
+    showSetup(savedUrl());
+  });
+
+  setup.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var url = normalize(input.value);
+    if (!/^https?:\/\/.+/.test(url)) {
+      error.textContent = 'Введите адрес вида http://192.168.1.10:4000';
+      error.hidden = false;
+      return;
+    }
+    // Запоминаем сразу, даже неверный — при следующем запуске поле будет заполнено
+    save(url);
+    connect(url);
+  });
+
+  // D-pad: стрелки вверх/вниз переключают фокус между полем и кнопками
+  document.addEventListener('keydown', function (e) {
+    if (e.keyCode !== 38 && e.keyCode !== 40) return;
+    var card = connecting.hidden ? setup : connecting;
+    var items = Array.prototype.slice.call(card.querySelectorAll('input, button'));
+    var i = items.indexOf(document.activeElement);
+    var next = items[i + (e.keyCode === 40 ? 1 : -1)];
+    if (next) {
+      e.preventDefault();
+      next.focus();
+    }
+  });
+
+  var initial = savedUrl();
+  if (initial) connect(initial); else showSetup('');
+</script>
+</body>
+</html>
