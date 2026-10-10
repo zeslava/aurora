@@ -134,7 +134,7 @@
     <AppHeader>
       <h1 class="header__logo">Aurora</h1>
       <div class="header__actions">
-        <button onclick={handleScan} class="btn">Сканировать</button>
+        <button onclick={handleScan} class="btn">Обновить</button>
         <button onclick={() => (pairOpen = true)} class="btn">Подключить ТВ</button>
         <button onclick={() => auth.logout()} class="btn">Выйти</button>
       </div>
@@ -185,7 +185,7 @@
         <h2 class="library__title">Вся медиатека</h2>
       {/if}
       {#if filteredAndSortedMedia.length === 0}
-        <div class="empty">Медиатека пуста. Запустите сканирование.</div>
+        <div class="empty">Медиатека пуста. Нажмите «Обновить».</div>
       {:else}
         <div class="media-grid">
           {#each filteredAndSortedMedia as item (item.id)}
