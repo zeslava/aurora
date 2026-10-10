@@ -588,8 +588,9 @@ impl Database {
         }
     }
 
-    /// «Продолжить просмотр»: незавершённые файлы пользователя (0 < position < duration),
-    /// сопоставленные с фильмом или эпизодом, отсортированные по времени просмотра.
+    /// «Продолжить просмотр»: незавершённые фильмы (0 < position < duration) и по одному
+    /// эпизоду на сериал (недосмотренный или следующий за досмотренным),
+    /// отсортированные по времени просмотра.
     pub async fn get_continue_watching(
         &self,
         user_id: u64,
@@ -610,19 +611,43 @@ impl Database {
         .await
         .context("Не удалось получить продолжение (фильмы)")?;
 
-        // Эпизоды
+        // Эпизоды: по одной карточке на сериал — последний просмотренный эпизод,
+        // а если он досмотрен, то следующий за ним (по сезону и номеру).
         let episode_rows = sqlx::query(
-            "SELECT e.id, COALESCE(s.custom_title, s.title), ps.position, mf.duration, ps.last_watched,
+            "WITH last AS (
+                SELECT e.id, e.series_id, e.season_number, e.episode_number, ps.position, ps.last_watched,
+                       (ps.completed = 1 OR (mf.duration IS NOT NULL AND ps.position >= mf.duration)) AS finished,
+                       ROW_NUMBER() OVER (PARTITION BY e.series_id ORDER BY ps.last_watched DESC) AS rn
+                FROM playback_state ps
+                JOIN media_files mf ON mf.id = ps.file_id
+                JOIN episodes e ON e.file_id = mf.id
+                WHERE ps.user_id = ?
+             ),
+             target AS (
+                SELECT CASE WHEN l.finished THEN (
+                           SELECT n.id FROM episodes n
+                           WHERE n.series_id = l.series_id
+                             AND (n.season_number > l.season_number
+                                  OR (n.season_number = l.season_number AND n.episode_number > l.episode_number))
+                           ORDER BY n.season_number, n.episode_number
+                           LIMIT 1
+                       ) ELSE l.id END AS episode_id,
+                       l.last_watched
+                FROM last l
+                WHERE l.rn = 1 AND (l.finished OR l.position > 0)
+             )
+             SELECT e.id, COALESCE(s.custom_title, s.title),
+                    CASE WHEN nps.completed = 1 THEN 0 ELSE COALESCE(nps.position, 0) END,
+                    mf.duration, t.last_watched,
                     e.series_id, e.season_number, e.episode_number, e.title AS episode_title,
                     s.poster_file, s.backdrop_file
-             FROM playback_state ps
-             JOIN media_files mf ON mf.id = ps.file_id
-             JOIN episodes e ON e.file_id = mf.id
+             FROM target t
+             JOIN episodes e ON e.id = t.episode_id
+             JOIN media_files mf ON mf.id = e.file_id
              JOIN media_items s ON s.id = e.series_id
-             WHERE ps.user_id = ? AND ps.completed = 0
-               AND ps.position > 0
-               AND (mf.duration IS NULL OR ps.position < mf.duration)",
+             LEFT JOIN playback_state nps ON nps.user_id = ? AND nps.file_id = e.file_id",
         )
+        .bind(user_id as i64)
         .bind(user_id as i64)
         .fetch_all(&self.pool)
         .await
