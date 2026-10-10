@@ -1386,10 +1386,9 @@ async fn insert_file_if_new(state: &AppState, file_path: &PathBuf) -> Option<u64
 #[derive(Serialize)]
 struct HomeResponse {
     continue_watching: Vec<ContinueWatchingItem>,
-    recently_added: Vec<MediaItem>,
 }
 
-/// Главный экран: «Продолжить просмотр» (по текущему пользователю) + «Недавно добавленное».
+/// Главный экран: «Продолжить просмотр» (по текущему пользователю).
 async fn home_handler(
     State(state): State<AppState>,
     Extension(claims): Extension<auth::Claims>,
@@ -1403,15 +1402,7 @@ async fn home_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let recently_added = state.db.get_recently_added(20).await.map_err(|e| {
-        tracing::error!("Ошибка получения «недавно добавленное»: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(HomeResponse {
-        continue_watching,
-        recently_added,
-    }))
+    Ok(Json(HomeResponse { continue_watching }))
 }
 
 async fn media_list_handler(

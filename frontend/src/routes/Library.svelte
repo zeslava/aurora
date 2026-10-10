@@ -11,12 +11,14 @@
   import type { MediaItem, PlaybackState, HomeResponse } from '../types';
 
   type FilterType = 'all' | 'movie' | 'tvseries';
+  type SortType = 'newest' | 'title' | 'title-desc';
 
   let media = $state<MediaItem[]>([]);
   let home = $state<HomeResponse | null>(null);
   let progressMap = $state<Record<string, PlaybackState>>({});
   let loading = $state(true);
   let filter = $state<FilterType>('all');
+  let sort = $state<SortType>('newest');
   let pairOpen = $state(false);
 
   const loadMedia = async () => {
@@ -107,7 +109,18 @@
       filtered = filtered.filter((item) => item.type === filter);
     }
 
-    return [...filtered].sort((a, b) => a.title.localeCompare(b.title));
+    const byTitle = (a: MediaItem, b: MediaItem) => a.title.localeCompare(b.title);
+    // Без created_at элемент уходит в конец списка
+    const addedAt = (item: MediaItem) => (item.created_at ? Date.parse(item.created_at) : 0);
+
+    switch (sort) {
+      case 'newest':
+        return [...filtered].sort((a, b) => addedAt(b) - addedAt(a) || byTitle(a, b));
+      case 'title':
+        return [...filtered].sort(byTitle);
+      case 'title-desc':
+        return [...filtered].sort((a, b) => byTitle(b, a));
+    }
   });
 
   // Главный экран показываем только без фильтра
@@ -155,35 +168,25 @@
       </div>
     </div>
 
-    <!-- Главный экран: продолжить просмотр + недавно добавленное -->
-    {#if showHome && home}
+    {#if showHome && home && home.continue_watching.length > 0}
       <div class="container sections">
-        {#if home.continue_watching.length > 0}
-          <Section title="Продолжить просмотр">
-            <Row bind:element={continueRow}>
-              {#each home.continue_watching as item (item.id)}
-                <ContinueCard {item} />
-              {/each}
-            </Row>
-          </Section>
-        {/if}
-        {#if home.recently_added.length > 0}
-          <Section title="Недавно добавленное">
-            <div class="media-grid">
-              {#each home.recently_added as item (item.id)}
-                <MediaCard media={item} progress={progressMap[item.id]} />
-              {/each}
-            </div>
-          </Section>
-        {/if}
+        <Section title="Продолжить просмотр">
+          <Row bind:element={continueRow}>
+            {#each home.continue_watching as item (item.id)}
+              <ContinueCard {item} />
+            {/each}
+          </Row>
+        </Section>
       </div>
     {/if}
 
     <!-- Сетка медиа -->
     <div class="container library">
-      {#if showHome && home && (home.continue_watching.length > 0 || home.recently_added.length > 0)}
-        <h2 class="library__title">Вся медиатека</h2>
-      {/if}
+      <select class="select library__sort" bind:value={sort} aria-label="Сортировка">
+        <option value="newest">Сначала новые</option>
+        <option value="title">По алфавиту</option>
+        <option value="title-desc">По алфавиту (Я–А)</option>
+      </select>
       {#if filteredAndSortedMedia.length === 0}
         <div class="empty">Медиатека пуста. Нажмите «Обновить».</div>
       {:else}
@@ -239,10 +242,8 @@
     padding-block: var(--space-6);
   }
 
-  .library__title {
+  .library__sort {
     margin-bottom: var(--space-4);
-    font-size: var(--text-xl);
-    font-weight: var(--weight-bold);
   }
 
   .empty {

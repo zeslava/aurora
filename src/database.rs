@@ -707,21 +707,6 @@ impl Database {
         Ok(items)
     }
 
-    /// «Недавно добавленное»: фильмы и сериалы по времени создания записи.
-    pub async fn get_recently_added(&self, limit: i64) -> Result<Vec<MediaItem>> {
-        let rows = sqlx::query(&format!(
-            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.title), mi.year, mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title \
-             FROM media_items mi LEFT JOIN media_files mf ON mi.file_id = mf.id \
-             ORDER BY mi.created_at DESC LIMIT ?"
-        ))
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .context("Не удалось получить недавно добавленное")?;
-
-        Ok(rows.into_iter().map(row_to_media_item).collect())
-    }
-
     /// Создает нового пользователя
     pub async fn create_user(&self, username: &str, password_hash: &str) -> Result<u64> {
         let result =

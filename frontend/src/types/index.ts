@@ -102,7 +102,6 @@ export interface ContinueWatchingItem {
 
 export interface HomeResponse {
   continue_watching: ContinueWatchingItem[];
-  recently_added: MediaItem[];
 }
 
 export interface SeriesEpisodesResponse {
