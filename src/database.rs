@@ -1071,9 +1071,17 @@ fn media_type_str(media_type: &MediaType) -> &'static str {
     }
 }
 
+// SQLite CURRENT_TIMESTAMP пишет "YYYY-MM-DD HH:MM:SS" в UTC, без зоны — это не RFC 3339
 fn parse_created_at(s: Option<String>) -> Option<DateTime<Utc>> {
-    s.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+    let s = s?;
+    DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|dt| dt.and_utc())
+        })
 }
 
 fn row_to_media_file(row: sqlx::sqlite::SqliteRow) -> MediaFile {
