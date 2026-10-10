@@ -152,7 +152,9 @@ export const initSpatialNavigation = (onBack?: () => void) => {
 
     const direction = KEY_TO_DIRECTION[e.keyCode];
     if (!direction) return;
-    if (isTextInput(active) && (direction === 'left' || direction === 'right')) return;
+    const horizontal = direction === 'left' || direction === 'right';
+    // Закрытый select стрелки влево/вправо не использует — с него можно уйти по строке
+    if (horizontal && isTextInput(active) && active?.tagName !== 'SELECT') return;
 
     const focusables = collectFocusable();
     if (focusables.length === 0) return;
@@ -174,6 +176,19 @@ export const initSpatialNavigation = (onBack?: () => void) => {
         if (!target) return;
         target[0].focus();
         target[0].scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+        return;
+      }
+    }
+
+    // Влево/вправо — сначала соседний элемент той же строки: по геометрии далёкий
+    // элемент на правом краю тулбара проигрывает ближайшей карточке строкой ниже
+    if (horizontal) {
+      const row = collectRows().find((r) => r.includes(active));
+      const target = row?.[row.indexOf(active) + (direction === 'right' ? 1 : -1)];
+      if (target) {
+        e.preventDefault();
+        target.focus();
+        target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
         return;
       }
     }
