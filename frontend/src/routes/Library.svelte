@@ -166,6 +166,11 @@
           Сериалы
         </button>
       </div>
+      <select class="select" bind:value={sort} aria-label="Сортировка">
+        <option value="newest">Сначала новые</option>
+        <option value="title">По алфавиту</option>
+        <option value="title-desc">По алфавиту (Я–А)</option>
+      </select>
     </div>
 
     {#if showHome && home && home.continue_watching.length > 0}
@@ -182,11 +187,6 @@
 
     <!-- Сетка медиа -->
     <div class="container library">
-      <select class="select library__sort" bind:value={sort} aria-label="Сортировка">
-        <option value="newest">Сначала новые</option>
-        <option value="title">По алфавиту</option>
-        <option value="title-desc">По алфавиту (Я–А)</option>
-      </select>
       {#if filteredAndSortedMedia.length === 0}
         <div class="empty">Медиатека пуста. Нажмите «Обновить».</div>
       {:else}
@@ -214,7 +214,9 @@
 
   .toolbar {
     display: flex;
-    flex-direction: column;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
     gap: var(--space-4);
     padding-top: var(--space-6);
   }
@@ -222,13 +224,6 @@
   .toolbar__filters {
     display: flex;
     gap: var(--space-2);
-  }
-
-  @media (min-width: 640px) {
-    .toolbar {
-      flex-direction: row;
-      justify-content: space-between;
-    }
   }
 
   .sections {
@@ -240,10 +235,6 @@
 
   .library {
     padding-block: var(--space-6);
-  }
-
-  .library__sort {
-    margin-bottom: var(--space-4);
   }
 
   .empty {
