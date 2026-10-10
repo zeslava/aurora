@@ -28,7 +28,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
 use tower::ServiceBuilder;
 use tower_http::{
-    cors::{Any, CorsLayer},
+    cors::{AllowOrigin, CorsLayer},
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -113,7 +113,12 @@ struct ProgressUpdateRequest {
 /// Создает и настраивает Axum router
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        // Свой SPA ходит same-origin, CORS нужен только ТВ-приложению с file:// (`Origin: null`).
+        // Такой Origin бывает и у sandboxed iframe на чужом сайте, поэтому cross-origin
+        // запросы всегда требуют токен — см. `trusted_lan`
+        .allow_origin(AllowOrigin::exact(axum::http::HeaderValue::from_static(
+            "null",
+        )))
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
@@ -152,6 +157,7 @@ pub fn create_router(state: AppState) -> Router {
 
     let protected = Router::new()
         .route("/api/metrics", get(metrics_handler))
+        .route("/api/auth/refresh", post(refresh_handler))
         .route("/api/pair/confirm", post(pair_confirm_handler))
         .route("/api/libraries", get(libraries_handler))
         .route("/api/libraries/scan", post(scan_handler))
@@ -230,7 +236,7 @@ async fn require_auth(
         Some(token) => {
             auth::verify_token(&token, &state.config).map_err(|_| StatusCode::UNAUTHORIZED)?
         }
-        None if trusted_lan(&state.config, peer) => {
+        None if trusted_lan(&state.config, peer, req.headers()) => {
             let (user_id, username) = state
                 .db
                 .get_first_user()
@@ -263,9 +269,26 @@ fn request_token(req: &axum::extract::Request) -> Option<String> {
 }
 
 /// За reverse proxy на том же хосте все клиенты выглядят как loopback,
-/// поэтому там доверие к LAN выключают через STRICT_AUTH=true
-fn trusted_lan(config: &Config, peer: Option<SocketAddr>) -> bool {
-    !config.strict_auth && peer.is_some_and(|addr| auth::is_lan(addr.ip()))
+/// поэтому там доверие к LAN выключают через STRICT_AUTH=true.
+/// Cross-origin запрос не доверенный даже из LAN: иначе любой сайт, открытый в домашнем
+/// браузере, управлял бы сервером от имени первого пользователя
+fn trusted_lan(config: &Config, peer: Option<SocketAddr>, headers: &HeaderMap) -> bool {
+    !config.strict_auth && peer.is_some_and(|addr| auth::is_lan(addr.ip())) && same_origin(headers)
+}
+
+/// Без `Origin` — навигация, `<video>`/`<img>` или не браузер; иначе хост из `Origin`
+/// должен совпасть с `Host`. `Origin: null` (file://, sandboxed iframe) — не same-origin
+fn same_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let origin_host = origin
+        .to_str()
+        .ok()
+        .and_then(|o| o.split_once("://"))
+        .map(|(_, host)| host);
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+    origin_host.is_some() && origin_host == host
 }
 
 /// Health check endpoint
@@ -308,7 +331,7 @@ async fn register_handler(
         .is_some();
     let authorized = auth::extract_token(headers.get(header::AUTHORIZATION))
         .is_some_and(|t| auth::verify_token(&t, &state.config).is_ok());
-    if has_users && !authorized && !trusted_lan(&state.config, Some(addr)) {
+    if has_users && !authorized && !trusted_lan(&state.config, Some(addr), &headers) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
@@ -468,12 +491,31 @@ async fn login_handler(
     }))
 }
 
+/// Продление токена: клиент зовёт при запуске, и пока устройством пользуются,
+/// токен не истекает
+async fn refresh_handler(
+    State(state): State<AppState>,
+    Extension(claims): Extension<auth::Claims>,
+) -> Result<Json<AuthResponse>, StatusCode> {
+    let token = create_token(claims.user_id, &claims.username, &state.config).map_err(|e| {
+        tracing::error!("Ошибка создания токена: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(AuthResponse {
+        token,
+        user_id: claims.user_id,
+        username: claims.username,
+    }))
+}
+
 /// Вход без пароля для клиентов из локальной сети — под первым пользователем
 async fn lan_login_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<Json<AuthResponse>, StatusCode> {
-    if !trusted_lan(&state.config, Some(addr)) {
+    if !trusted_lan(&state.config, Some(addr), &headers) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1341,7 +1383,6 @@ async fn home_handler(
     State(state): State<AppState>,
     Extension(claims): Extension<auth::Claims>,
 ) -> Result<Json<HomeResponse>, StatusCode> {
-
     let continue_watching = state
         .db
         .get_continue_watching(claims.user_id, 20)
@@ -2104,7 +2145,6 @@ async fn update_media_handler(
     Path(id): Path<String>,
     Json(payload): Json<UpdateMediaRequest>,
 ) -> Result<Json<MediaItem>, StatusCode> {
-
     let custom_title = payload
         .custom_title
         .map(|t| t.trim().to_string())
@@ -3379,7 +3419,8 @@ mod tests {
     }
 
     async fn auth_state(strict_auth: bool) -> AppState {
-        let (mut state, _) = state_with_movie(std::path::Path::new("/nonexistent.mp4"), "aac").await;
+        let (mut state, _) =
+            state_with_movie(std::path::Path::new("/nonexistent.mp4"), "aac").await;
         state.db.create_user("home", "hash").await.unwrap();
         let mut config = (*state.config).clone();
         config.strict_auth = strict_auth;
@@ -3390,20 +3431,32 @@ mod tests {
     #[tokio::test]
     async fn lan_client_needs_no_token_by_default() {
         let state = auth_state(false).await;
-        assert_eq!(auth_status(&state, "192.168.1.20:5000", None).await, StatusCode::OK);
-        assert_eq!(auth_status(&state, "127.0.0.1:5000", None).await, StatusCode::OK);
+        assert_eq!(
+            auth_status(&state, "192.168.1.20:5000", None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            auth_status(&state, "127.0.0.1:5000", None).await,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
     async fn outside_client_needs_valid_token() {
         let state = auth_state(false).await;
         let token = create_token(1, "home", &state.config).unwrap();
-        assert_eq!(auth_status(&state, "8.8.8.8:5000", None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            auth_status(&state, "8.8.8.8:5000", None).await,
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(
             auth_status(&state, "8.8.8.8:5000", Some("garbage")).await,
             StatusCode::UNAUTHORIZED
         );
-        assert_eq!(auth_status(&state, "8.8.8.8:5000", Some(&token)).await, StatusCode::OK);
+        assert_eq!(
+            auth_status(&state, "8.8.8.8:5000", Some(&token)).await,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -3413,6 +3466,85 @@ mod tests {
             auth_status(&state, "192.168.1.20:5000", None).await,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// Запрос без токена из LAN с заданным `Origin` — так его шлёт браузер
+    async fn lan_status_with_origin(
+        state: &AppState,
+        method: &str,
+        uri: &str,
+        origin: &str,
+    ) -> StatusCode {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::HOST, "192.168.1.5:4000")
+            .header(header::ORIGIN, origin)
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "192.168.1.20:5000".parse::<SocketAddr>().unwrap(),
+        ));
+        create_router(state.clone())
+            .oneshot(req)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn same_origin_lan_page_needs_no_token() {
+        let state = auth_state(false).await;
+        assert_eq!(
+            lan_status_with_origin(&state, "GET", "/api/libraries", "http://192.168.1.5:4000")
+                .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            lan_status_with_origin(&state, "POST", "/api/auth/lan", "http://192.168.1.5:4000")
+                .await,
+            StatusCode::OK
+        );
+    }
+
+    /// Чужой сайт, открытый в домашнем браузере, не должен получить доступ через LAN-доверие
+    #[tokio::test]
+    async fn cross_origin_page_gets_no_lan_trust() {
+        let state = auth_state(false).await;
+        for origin in ["https://evil.example", "null"] {
+            assert_eq!(
+                lan_status_with_origin(&state, "GET", "/api/libraries", origin).await,
+                StatusCode::UNAUTHORIZED,
+                "{origin}"
+            );
+            assert_eq!(
+                lan_status_with_origin(&state, "POST", "/api/auth/lan", origin).await,
+                StatusCode::FORBIDDEN,
+                "{origin}"
+            );
+        }
+    }
+
+    /// Клиент продлевает токен при запуске — пока устройством пользуются, вход не нужен
+    #[tokio::test]
+    async fn refresh_issues_a_fresh_long_token() {
+        let state = auth_state(false).await;
+        let token = create_token(1, "home", &state.config).unwrap();
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/refresh")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo("8.8.8.8:5000".parse::<SocketAddr>().unwrap()));
+        let resp = create_router(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let claims = auth::verify_token(json["token"].as_str().unwrap(), &state.config).unwrap();
+        assert!(claims.exp > (chrono::Utc::now() + chrono::Duration::days(300)).timestamp());
     }
 
     #[tokio::test]

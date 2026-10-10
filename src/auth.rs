@@ -26,13 +26,16 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, bcrypt::Bcryp
     bcrypt::verify(password, hash)
 }
 
-/// Создает JWT токен
+/// Создает JWT токен. Срок длинный, потому что клиент продлевает токен при каждом
+/// запуске (`/api/auth/refresh`): заново входить, только если устройство не открывали год.
+/// Особенно важно для ТВ — автовхода из LAN у него нет (`Origin: null` не отличить
+/// от чужой страницы), а вход с пульта мучителен
 pub fn create_token(
     user_id: u64,
     username: &str,
     config: &Config,
 ) -> Result<String, jsonwebtoken::errors::Error> {
-    let expiration = Utc::now() + Duration::days(7); // Токен действителен 7 дней
+    let expiration = Utc::now() + Duration::days(365);
 
     let claims = Claims {
         user_id,

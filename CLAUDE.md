@@ -47,7 +47,7 @@ Backend is a flat module set under `src/`, wired in `main.rs` → shared `AppSta
 - `metadata.rs` — parses the `ffprobe` JSON from `ffmpeg::probe_format_json` (duration, resolution, video/audio codec, bitrate).
 - `transcoder.rs` — `AudioTranscoder` spawns `ffmpeg` and streams fragmented MP4 (`-c:v copy`, audio → AAC stereo) as an async body stream; `HlsManager` generates HLS segments lazily.
 - `segments.rs` — `SegmentMap` is `Keyframes | Grid`; a `Grid` map is only valid when the video is re-encoded. The copy-profile cutter takes the `Keyframes` boundaries by type, so the combination that caused the desync bug does not compile.
-- `auth.rs` — JWT (jsonwebtoken, 7-day expiry) + bcrypt password hashing; token extracted from `Authorization` header.
+- `auth.rs` — JWT (jsonwebtoken, 365-day expiry, renewed on every client start) + bcrypt password hashing; token extracted from `Authorization` header.
 - `tmdb.rs` — TMDB client: title search (`search/movie`, `search/tv`) + downloading posters/backdrops into `<CACHE_DIR>/images`. Enrichment runs in the background after every scan and at startup for items with `tmdb_synced_at IS NULL`; images are served from `/api/media/:id/poster|backdrop` (public, like streams — `<img>` can't send an Authorization header).
 - `metrics.rs` — `MetricsCollector` (sysinfo) for process/system stats; logged every 60s and exposed at `/api/metrics`. Also `SEGMENT_DRIFT`: an invariant counter over "a served segment lasts exactly what the map promises" — `mismatched > 0` is a bug even with no user complaints.
 
@@ -65,7 +65,7 @@ Two endpoints:
 - `/api/media/:id/stream` — direct file streaming with HTTP Range support, capped at a 10 MB chunk per request (`MAX_CHUNK_SIZE`); the `:id` may be either a media item or an episode.
 - `/api/media/:id/stream-transcoded` — checks the audio codec; if it's `ac3`/`dts`/`truehd`/`eac3` (not browser-playable) it transcodes via `ffmpeg` in ~120s duration chunks, seeking with `-ss` from a `start` (seconds) query param or a byte-Range converted to seconds. Otherwise it delegates to the plain `stream_handler`. Do not byte-truncate the transcoded stream — it breaks the MP4 container; duration is bounded by ffmpeg `-t`.
 
-Auth: every `/api/*` route except `/health`, `/api/auth/*`, `/api/pair/start|poll` goes through the `require_auth` middleware in `server.rs`, which puts `auth::Claims` into request extensions (handlers take `Extension<Claims>`). The token comes from the `Authorization` header or `?token=` (`<video>`/`<img>`/hls.js can't send headers); the HLS playlist handler appends that token to every segment URI. Without a token, a LAN client is let through as the first user unless `STRICT_AUTH=true`.
+Auth: every `/api/*` route except `/health`, `/api/auth/*` (but `/api/auth/refresh`), `/api/pair/start|poll` goes through the `require_auth` middleware in `server.rs`, which puts `auth::Claims` into request extensions (handlers take `Extension<Claims>`). The token comes from the `Authorization` header or `?token=` (`<video>`/`<img>`/hls.js can't send headers); the HLS playlist handler appends that token to every segment URI. Without a token, a LAN client is let through as the first user unless `STRICT_AUTH=true` — but only for same-origin requests (`same_origin`): a cross-origin page or the TV app (`Origin: null`) always needs a token. Tokens live 365 days and every client renews its token via `/api/auth/refresh` on start, so a device in use never has to log in again.
 
 ### Data model
 

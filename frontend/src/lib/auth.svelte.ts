@@ -11,6 +11,8 @@ class Auth {
     // Валидность не проверяем: первый же 401 сбросит токен и вернёт на логин
     if (localStorage.getItem('auth_token')) {
       this.isAuthenticated = true;
+      // Ошибку глотаем: невалидный токен и так вернёт на логин через 401-обработчик
+      apiClient.refreshToken().then((r) => this.apply(r), () => {});
     }
     this.loading = false;
   }

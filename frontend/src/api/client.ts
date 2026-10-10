@@ -143,6 +143,13 @@ class ApiClient {
     return response.data;
   }
 
+  // Продление токена: устройство, которым пользуются, не приходится логинить заново
+  async refreshToken(): Promise<AuthResponse> {
+    const response = await this.client.post<AuthResponse>('/api/auth/refresh');
+    this.setToken(response.data.token);
+    return response.data;
+  }
+
   // Вход без пароля из локальной сети; бросает 403, если сервер не доверяет адресу
   async lanLogin(): Promise<AuthResponse> {
     const response = await this.client.post<AuthResponse>('/api/auth/lan');
