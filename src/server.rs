@@ -270,21 +270,14 @@ fn request_token(req: &axum::extract::Request) -> Option<String> {
 
 /// За reverse proxy на том же хосте все клиенты выглядят как loopback,
 /// поэтому там доверие к LAN выключают через STRICT_AUTH=true.
-/// Страховка на случай, если не выключили: запрос с заголовками прокси не доверенный —
-/// подделка такого заголовка только ужесточает проверку, поэтому верить им не нужно.
+/// Заголовки прокси (`X-Forwarded-For` и т.п.) не учитываются: закрывать доступ снаружи —
+/// дело внешнего периметра, а не сервера.
 /// Cross-origin запрос не доверенный даже из LAN: иначе любой сайт, открытый в домашнем
 /// браузере, управлял бы сервером от имени первого пользователя
 fn trusted_lan(config: &Config, peer: Option<SocketAddr>, headers: &HeaderMap) -> bool {
     !config.strict_auth
         && peer.is_some_and(|addr| auth::is_lan(addr.ip()))
-        && !proxied(headers)
         && same_origin(headers)
-}
-
-fn proxied(headers: &HeaderMap) -> bool {
-    ["x-forwarded-for", "x-real-ip", "forwarded"]
-        .iter()
-        .any(|name| headers.contains_key(*name))
 }
 
 /// Без `Origin` — навигация, `<video>`/`<img>` или не браузер; иначе хост из `Origin`
@@ -3486,7 +3479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxied_loopback_client_needs_token() {
+    async fn proxied_lan_client_needs_no_token() {
         let state = auth_state(false).await;
         for name in ["x-forwarded-for", "x-real-ip", "forwarded"] {
             let mut req = Request::builder()
@@ -3501,7 +3494,7 @@ mod tests {
                 .await
                 .unwrap()
                 .status();
-            assert_eq!(status, StatusCode::UNAUTHORIZED, "{name}");
+            assert_eq!(status, StatusCode::OK, "{name}");
         }
     }
 
