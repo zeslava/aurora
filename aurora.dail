@@ -1,4 +1,4 @@
-FROM 15.0-RELEASE
+FROM 15.1-RELEASE
 
 # ffmpeg/ffprobe обязательны: probe метаданных и транскодирование аудио
 RUN pkg install -y ffmpeg
