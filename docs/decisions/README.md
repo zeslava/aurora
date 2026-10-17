@@ -16,4 +16,4 @@
 - [0005 — Чересстрочный источник не может идти через `-c:v copy`](0005-interlaced-source-forces-transcode.md)
 - [0006 — Один HLS-движок на всех платформах](0006-single-hls-engine.md)
 - [0008 — webOS-приложение — оболочка, SPA приходит с сервера](0008-webos-shell.md)
-- [0010 — Docker-образ со своей сборкой ffmpeg](0010-minimal-ffmpeg-image.md)
+- [0010 — Docker-образ: ffmpeg из apk, без лишних пакетов](0010-docker-image-ffmpeg.md)
