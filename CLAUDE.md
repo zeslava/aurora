@@ -53,7 +53,7 @@ Backend is a flat module set under `src/`, wired in `main.rs` → shared `AppSta
 
 - `testkit.rs` (`#[cfg(test)]`) — the axes along which real files differ (`TimestampForm`, `GopForm`, `VideoForm`, `AudioForm`), `Shape::matrix()` of fixtures generated on the fly, and `assert_playable` — the one playability checklist used by every streaming test. **Never write a test against a hand-rolled fixture: add a `Shape` instead.** A fixture healthier than a real release is why three bugs shipped green.
 
-Hard-won decisions live in `docs/decisions/` — read them before touching ffmpeg recipes or HLS segmentation, and add a record rather than rewriting one when a decision changes.
+Hard-won decisions live in `docs/decisions/` — read them before touching ffmpeg recipes or HLS segmentation, and when a decision is superseded, rewrite its record in place (keeping the rejected option and why in it) rather than adding a new one.
 
 Streaming tests, in order of what they buy you:
 - `cargo test` — includes `every_source_shape_produces_playable_segments`, the full matrix (~10 s, needs ffmpeg).
