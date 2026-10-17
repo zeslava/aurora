@@ -195,7 +195,6 @@ impl AudioTranscodeStream<'_> {
         );
         // Отрицательные таймстемпы после seek ломают воспроизведение с начала потока.
         push(&mut args, "-avoid_negative_ts", "make_zero");
-        push(&mut args, "-reset_timestamps", "1");
         args.push(OsString::from("-"));
         args
     }
