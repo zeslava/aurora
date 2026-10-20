@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  // Сканируем при первом показе медиатеки за запуск приложения, а не при каждом возврате на экран
+  let scannedOnStart = false;
+</script>
+
 <script lang="ts">
   import { auth } from '../lib/auth.svelte';
   import { apiClient } from '../api/client';
@@ -24,7 +29,6 @@
 
   const loadMedia = async () => {
     try {
-      loading = true;
       media = await apiClient.getMedia();
     } catch (error) {
       console.error('Ошибка загрузки медиа:', error);
@@ -102,6 +106,12 @@
       console.error('Ошибка сканирования:', error);
     }
   };
+
+  // Сначала показываем то, что уже в базе, — скан идёт в фоне и подменяет список по готовности
+  if (!scannedOnStart) {
+    scannedOnStart = true;
+    handleScan();
+  }
 
   // Фильтрация и сортировка
   let filteredAndSortedMedia = $derived.by(() => {
