@@ -5,9 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Aurora</title>
 <!--
-  Оболочка webOS-приложения. Сама SPA приходит с сервера Aurora: здесь только
+  Оболочка webOS- и Android TV-приложения. Сама SPA приходит с сервера Aurora: здесь только
   адрес сервера, проверка доступности и переход на него. Так обновление сервера
-  обновляет и ТВ, без переустановки .ipk. См. docs/decisions/0008-webos-shell.md
+  обновляет и ТВ, без переустановки .ipk/.apk. См. docs/decisions/0008-webos-shell.md,
+  docs/decisions/0009-android-tv-shell.md
 -->
 <style>
   html { font-size: 22px; }
@@ -55,6 +56,11 @@
 </form>
 
 <script>
+  // Android TV-оболочка (android/): та же ширина 1920, что и на webOS, см. lib/tvMode.ts
+  if (navigator.userAgent.indexOf('AuroraTV') !== -1) {
+    document.querySelector('meta[name="viewport"]').setAttribute('content', 'width=1920');
+  }
+
   // Подставляется build-webos.sh из AURORA_SERVER_URL; пусто — адрес вводится здесь
   var DEFAULT_URL = '__AURORA_SERVER_URL__'.indexOf('__') === 0 ? '' : '__AURORA_SERVER_URL__';
   var KEY = 'server_url';

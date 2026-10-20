@@ -6,6 +6,9 @@ vars:
   FRONTEND_DIR: frontend
   WEBOS_DEVICE: '{{.WEBOS_DEVICE | default "LGTV"}}'
   WEBOS_APP_ID: com.aurora.mediaserver
+  # adb-устройство (ip:5555 после adb connect); пусто — единственное подключённое
+  ANDROID_DEVICE: '{{.ANDROID_DEVICE | default ""}}'
+  ADB: adb{{if .ANDROID_DEVICE}} -s {{.ANDROID_DEVICE}}{{end}}
 
 tasks:
   default:
@@ -115,6 +118,33 @@ tasks:
     desc: Удаление приложения с телевизора
     cmds:
       - ares-uninstall --device {{.WEBOS_DEVICE}} {{.WEBOS_APP_ID}}
+
+  android-build:
+    desc: 'Сборка .apk-оболочки для Android TV в Docker (адрес сервера по умолчанию: AURORA_SERVER_URL, иначе ввод в приложении)'
+    cmds:
+      - ./scripts/build-android.sh {{.CLI_ARGS}}
+
+  android-install:
+    desc: 'Установка собранного .apk на ТВ (ANDROID_DEVICE=ip:5555, предварительно adb connect)'
+    cmds:
+      - '{{.ADB}} install -r $(ls -t build/apk/*.apk | head -1)'
+
+  android-launch:
+    desc: Запуск приложения на Android TV
+    cmds:
+      - '{{.ADB}} shell am start -n {{.WEBOS_APP_ID}}/.MainActivity'
+
+  android-deploy:
+    desc: Сборка .apk + установка + запуск на Android TV
+    cmds:
+      - task: android-build
+      - task: android-install
+      - task: android-launch
+
+  android-uninstall:
+    desc: Удаление приложения с Android TV
+    cmds:
+      - '{{.ADB}} uninstall {{.WEBOS_APP_ID}}'
 
   docker-up:
     desc: Запуск в Docker (та же БД ./data/aurora.db через bind-mount)

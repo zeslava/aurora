@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Системные панели на ТВ и в полноэкранном видео прячет MainActivity, на телефоне они видны -->
+    <style name="Theme.Aurora" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:statusBarColor">@color/background</item>
+        <item name="android:navigationBarColor">@color/background</item>
+        <!-- targetSdk 35 на Android 15 рисует под системными панелями — шапка SPA ушла бы под статус-бар -->
+        <item name="android:windowOptOutEdgeToEdgeEnforcement" tools:targetApi="35">true</item>
+    </style>
+    <color name="background">#0f172a</color>
+</resources>

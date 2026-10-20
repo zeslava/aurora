@@ -20,6 +20,8 @@ Frontend (from `frontend/`):
 
 Full stack: `docker compose up --build` (serves everything on `:4000`).
 
+TV apps are thin shells over `frontend/webos/index.html` (the SPA comes from the server): `task webos-deploy` (`.ipk`), `task android-deploy` (`.apk`, built in Docker from `android/`, no local SDK needed).
+
 `ffmpeg` and `ffprobe` must be on `PATH` — `ffprobe` for metadata extraction, `ffmpeg` for transcoding.
 
 ## Configuration (env vars)

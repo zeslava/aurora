@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+# Генерирует scripts/build-android.sh
+app/src/main/assets/
+app/src/main/res/drawable/
+app/src/main/res/mipmap-*/
