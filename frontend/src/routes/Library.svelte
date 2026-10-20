@@ -155,8 +155,10 @@
       <h1 class="header__logo">Aurora</h1>
       <div class="header__actions">
         <button onclick={handleScan} class="btn">Обновить</button>
-        <button onclick={() => (pairOpen = true)} class="btn">Подключить ТВ</button>
-        <button onclick={() => auth.logout()} class="btn">Выйти</button>
+        {#if !auth.lan}
+          <button onclick={() => (pairOpen = true)} class="btn">Подключить ТВ</button>
+          <button onclick={() => auth.logout()} class="btn">Выйти</button>
+        {/if}
       </div>
     </AppHeader>
 

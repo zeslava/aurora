@@ -58,6 +58,19 @@ async fn main() -> Result<()> {
     db.run_migrations().await?;
     info!("Миграции выполнены успешно");
 
+    // Без STRICT_AUTH в домашней сети входа нет: все работают от первого пользователя,
+    // поэтому он нужен с первого запуска. Пароль случайный — для входа снаружи
+    // заводится свой пользователь (или включается STRICT_AUTH)
+    if !config.strict_auth && db.get_first_user().await?.is_none() {
+        let password: String = rand::random::<[u8; 16]>()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        db.create_user("aurora", &auth::hash_password(&password)?)
+            .await?;
+        info!("Создан пользователь aurora для входа без пароля из локальной сети");
+    }
+
     // Создание коллектора метрик
     let metrics = Arc::new(MetricsCollector::new());
 

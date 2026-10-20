@@ -14,11 +14,9 @@
 
   let isRegister = $derived(mode === 'register');
 
-  // Из домашней сети сервер пускает без пароля — форма нужна только снаружи
+  // Из домашней сети вход уже выполнил auth при запуске — сюда попадают только снаружи
   $effect(() => {
-    auth.tryLan().then((ok) => {
-      if (ok) navigate('/library', { replace: true });
-    });
+    if (auth.isAuthenticated) navigate('/library', { replace: true });
   });
 
   const switchMode = (next: Mode) => {
