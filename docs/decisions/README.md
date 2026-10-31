@@ -19,3 +19,4 @@
 - [0008 — webOS-приложение — оболочка, SPA приходит с сервера](0008-webos-shell.md)
 - [0009 — Android TV-приложение — та же оболочка в WebView](0009-android-tv-shell.md)
 - [0010 — Docker-образ: ffmpeg из apk, без лишних пакетов](0010-docker-image-ffmpeg.md)
+- [0011 — Видео перекодирует iGPU (VAAPI), CPU остаётся запасным путём](0011-vaapi-video-encode.md)

@@ -212,7 +212,16 @@ impl FileCache {
 /// Ключ кэша: id файла, профиль и отпечаток самого файла (путь + mtime + размер). Отпечаток
 /// обязателен — иначе подменённый на диске файл (или переиспользованный после пересканирования
 /// id) молча отдавался бы старыми сегментами из уцелевшей temp-директории.
-fn cache_key(file_id: u64, profile: segments::StreamProfile, file_path: &Path) -> String {
+///
+/// Кодировщик тоже входит в ключ: init.mp4 от `h264_vaapi` и сегменты от libx264 в одном
+/// каталоге плеер не склеит, а каталог переживает рестарт, после которого GPU мог
+/// появиться или пропасть.
+fn cache_key(
+    file_id: u64,
+    profile: segments::StreamProfile,
+    file_path: &Path,
+    on_gpu: bool,
+) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -227,7 +236,12 @@ fn cache_key(file_id: u64, profile: segments::StreamProfile, file_path: &Path) -
                 .hash(&mut hasher);
         }
     }
-    format!("{file_id}-{}-{:016x}", profile.cache_key(), hasher.finish())
+    let encoder = if on_gpu { "-vaapi" } else { "" };
+    format!(
+        "{file_id}-{}{encoder}-{:016x}",
+        profile.cache_key(),
+        hasher.finish()
+    )
 }
 
 /// Управляет кэшами сегментов по файлу и профилю: генерирует init/сегменты лениво,
@@ -246,6 +260,8 @@ pub struct HlsManager {
     /// Сколько ранов может жить одновременно на всех файлах; сверх лимита новый ран
     /// вытесняет раны файла, к которому дольше всех не обращались.
     max_runs: usize,
+    /// Render-устройство VAAPI, проверенное на старте. `None` — видео кодирует libx264.
+    vaapi: Option<PathBuf>,
 }
 
 impl HlsManager {
@@ -267,7 +283,15 @@ impl HlsManager {
             caches: Arc::new(AsyncMutex::new(HashMap::new())),
             root,
             max_runs: DEFAULT_MAX_RUNS,
+            vaapi: None,
         }
+    }
+
+    /// Перекодировать видео на iGPU через `device`. Устройство должно быть уже проверено
+    /// `ffmpeg::vaapi_h264_works`: упавший на GPU ран здесь на CPU не переигрывается.
+    pub fn with_vaapi(mut self, device: Option<PathBuf>) -> Self {
+        self.vaapi = device;
+        self
     }
 
     async fn cache_for(
@@ -276,7 +300,12 @@ impl HlsManager {
         file_path: &Path,
         profile: segments::StreamProfile,
     ) -> Arc<AsyncMutex<FileCache>> {
-        let key = cache_key(file_id, profile, file_path);
+        let key = cache_key(
+            file_id,
+            profile,
+            file_path,
+            profile.transcode_video && self.vaapi.is_some(),
+        );
         let root = self.root.clone();
         let mut caches = self.caches.lock().await;
         caches
@@ -379,9 +408,12 @@ impl HlsManager {
                     let failed_for_task = failed.clone();
                     let dir = guard.dir.clone();
                     let file_path = file_path.to_path_buf();
+                    let vaapi = self.vaapi.clone();
 
                     let task = tokio::spawn(async move {
-                        if let Err(e) = spawn_init_run(&file_path, &dir, profile).await {
+                        if let Err(e) =
+                            spawn_init_run(&file_path, &dir, profile, vaapi.as_deref()).await
+                        {
                             error!("Ошибка init-рана HLS: {e}");
                             *failed_for_task.lock().unwrap() = Some(e.to_string());
                         }
@@ -418,9 +450,18 @@ impl HlsManager {
                 let dir = guard.dir.clone();
                 let file_path = file_path.to_path_buf();
                 let map = map.clone();
+                let vaapi = self.vaapi.clone();
 
                 let task = tokio::spawn(async move {
-                    let result = spawn_run(&file_path, &dir, &map, start_index, profile).await;
+                    let result = spawn_run(
+                        &file_path,
+                        &dir,
+                        &map,
+                        start_index,
+                        profile,
+                        vaapi.as_deref(),
+                    )
+                    .await;
                     match result {
                         Ok(()) => {
                             debug!("ffmpeg-ран (start={start_index}) для {dir:?} завершён успешно");
@@ -581,6 +622,7 @@ async fn spawn_run(
     map: &segments::SegmentMap,
     start_index: usize,
     profile: segments::StreamProfile,
+    vaapi: Option<&Path>,
 ) -> Result<()> {
     if !profile.uses_fmp4() {
         let Some(boundaries) = map.as_keyframes() else {
@@ -589,6 +631,7 @@ async fn spawn_run(
         return run_copy_segments(file_path, dir, boundaries, start_index, profile).await;
     }
     let start_time = map.start_of(start_index).unwrap_or(0.0);
+    let source = gpu_source(file_path, vaapi).await?;
 
     let init_name = format!("init.{start_index}.tmp.mp4");
     let mut cmd = ffmpeg::command(
@@ -603,6 +646,7 @@ async fn spawn_run(
             max_seconds: None,
             segment_seconds: segments::GRID_SEGMENT_SECONDS,
             init_name: &init_name,
+            encoder: video_encoder(vaapi, source.as_ref()),
         }
         .to_args(),
     );
@@ -618,8 +662,11 @@ async fn spawn_run(
     log_stderr(&mut child);
 
     info!(
-        "ffmpeg HLS-ран запущен для {:?} (dir={:?}, start_index={})",
-        file_path, dir, start_index
+        "ffmpeg HLS-ран ({}) запущен для {:?} (dir={:?}, start_index={})",
+        encoder_name(source.as_ref()),
+        file_path,
+        dir,
+        start_index
     );
 
     let dir_for_init = dir.to_path_buf();
@@ -650,11 +697,13 @@ async fn spawn_init_run(
     file_path: &Path,
     dir: &Path,
     profile: segments::StreamProfile,
+    vaapi: Option<&Path>,
 ) -> Result<()> {
     let final_path = dir.join("init.mp4");
     if final_path.exists() {
         return Ok(());
     }
+    let source = gpu_source(file_path, vaapi).await?;
 
     let scratch = dir.join("init-scratch");
     let _ = tokio::fs::remove_dir_all(&scratch).await;
@@ -676,6 +725,7 @@ async fn spawn_init_run(
             max_seconds: Some(segments::GRID_SEGMENT_SECONDS),
             segment_seconds: segments::GRID_SEGMENT_SECONDS,
             init_name,
+            encoder: video_encoder(vaapi, source.as_ref()),
         }
         .to_args(),
     );
@@ -714,6 +764,39 @@ async fn spawn_init_run(
     let _ = tokio::fs::remove_dir_all(&scratch).await;
 
     Ok(())
+}
+
+/// Видеопоток источника для GPU-конвейера; `None`, если GPU не задан. ffprobe блокирующий,
+/// поэтому уходит в `spawn_blocking`. Ошибка роняет ран, а не переводит его на CPU:
+/// кодировщик входит в ключ каталога кэша, и сегменты libx264 в каталоге VAAPI склеились бы
+/// с чужим init.mp4.
+async fn gpu_source(file_path: &Path, vaapi: Option<&Path>) -> Result<Option<ffmpeg::SourceVideo>> {
+    if vaapi.is_none() {
+        return Ok(None);
+    }
+    let path = file_path.to_path_buf();
+    let source = tokio::task::spawn_blocking(move || ffmpeg::probe_source_video(&path))
+        .await
+        .context("ffprobe видеопотока не завершился")??;
+    Ok(Some(source))
+}
+
+fn video_encoder<'a>(
+    vaapi: Option<&'a Path>,
+    source: Option<&'a ffmpeg::SourceVideo>,
+) -> ffmpeg::VideoEncoder<'a> {
+    match (vaapi, source) {
+        (Some(device), Some(source)) => ffmpeg::VideoEncoder::Vaapi { device, source },
+        _ => ffmpeg::VideoEncoder::Software,
+    }
+}
+
+fn encoder_name(source: Option<&ffmpeg::SourceVideo>) -> &'static str {
+    match source {
+        Some(s) if s.is_hdr() => "vaapi+tonemap",
+        Some(_) => "vaapi",
+        None => "libx264",
+    }
 }
 
 /// Наполняет `dir` TS-сегментами начиная с `start_index`, по одному ffmpeg на сегмент.

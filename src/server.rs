@@ -2784,6 +2784,7 @@ mod tests {
             cache_dir: PathBuf::from("./cache"),
             strict_auth: true,
             ffmpeg_max_runs: crate::transcoder::DEFAULT_MAX_RUNS,
+            vaapi_device: None,
             jwt_secret: "test-secret".into(),
         };
         let state = AppState {
@@ -3121,6 +3122,7 @@ mod tests {
         let video_codec = match shape.video {
             crate::testkit::VideoForm::H264 | crate::testkit::VideoForm::H264Interlaced => "h264",
             crate::testkit::VideoForm::Mpeg4 => "mpeg4",
+            crate::testkit::VideoForm::HevcHdr10 => "hevc",
         };
         // field_order берём из самого файла, а не из формы: так тест ловит и случай,
         // когда сканер перестал класть признак в БД.
@@ -3203,6 +3205,38 @@ mod tests {
             let segments = fetch_segments(&state, &id, &out).await;
 
             crate::testkit::assert_playable(shape.name, &segments);
+        }
+    }
+
+    /// Та же матрица, но видео перекодирует iGPU через VAAPI: hwaccel-декод (HEVC HDR,
+    /// чересстрочный H.264 с deinterlace_vaapi) и программный декод с загрузкой на GPU
+    /// (mpeg4). На машине без рабочего VAAPI пропускается — гонять на сервере с iGPU:
+    /// `cargo test on_gpu -- --nocapture`.
+    #[tokio::test]
+    async fn every_source_shape_produces_playable_segments_on_gpu() {
+        let device = PathBuf::from(
+            std::env::var("VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into()),
+        );
+        if !ffmpeg_available() || !device.exists() || !crate::ffmpeg::vaapi_h264_works(&device) {
+            eprintln!("SKIP: VAAPI недоступен на {}", device.display());
+            return;
+        }
+
+        for shape in crate::testkit::Shape::matrix() {
+            let tmp = tempfile::tempdir().unwrap();
+            let file = shape.build(tmp.path());
+            let (mut state, id) = state_for_shape(&file, &shape).await;
+            state.hls = HlsManager::with_root(unique_cache_root()).with_vaapi(Some(device.clone()));
+
+            let out = tmp.path().join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            let segments = fetch_segments(&state, &id, &out).await;
+
+            crate::testkit::assert_playable(shape.name, &segments);
+            if shape.video == crate::testkit::VideoForm::HevcHdr10 {
+                let transfer = crate::testkit::probe_color_transfer(&segments[0].path);
+                assert_eq!(transfer, "bt709", "{}: HDR не переведён в SDR", shape.name);
+            }
         }
     }
 

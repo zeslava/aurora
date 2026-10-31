@@ -96,7 +96,15 @@ async fn main() -> Result<()> {
 
     // Создание состояния приложения
     let config_arc = Arc::new(config.clone());
-    let hls = HlsManager::new(config.ffmpeg_max_runs);
+    let vaapi = config
+        .vaapi_device
+        .clone()
+        .filter(|device| device.exists() && ffmpeg::vaapi_h264_works(device));
+    match &vaapi {
+        Some(device) => info!("Видео перекодируется на GPU (VAAPI, {})", device.display()),
+        None => info!("Видео перекодируется на CPU (libx264): VAAPI не задан или не работает"),
+    }
+    let hls = HlsManager::new(config.ffmpeg_max_runs).with_vaapi(vaapi);
 
     // Периодическая очистка простаивающих HLS-сессий (temp-директории с сегментами)
     let hls_cleanup = hls.clone();

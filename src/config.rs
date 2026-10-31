@@ -22,6 +22,9 @@ pub struct Config {
     pub strict_auth: bool,
     /// Сколько HLS-ранов ffmpeg может идти одновременно на весь сервер
     pub ffmpeg_max_runs: usize,
+    /// Render-устройство VAAPI для перекодирования видео на iGPU; `None` — только CPU.
+    /// Годится ли оно, проверяется на старте пробным кодированием.
+    pub vaapi_device: Option<PathBuf>,
     /// Ключ подписи JWT: JWT_SECRET или сгенерированный и сохранённый рядом с БД
     pub jwt_secret: String,
 }
@@ -84,6 +87,13 @@ impl Config {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(crate::transcoder::DEFAULT_MAX_RUNS);
 
+        // "off" (или пустое значение) выключает GPU даже там, где он есть.
+        let vaapi_device = match std::env::var("VAAPI_DEVICE") {
+            Ok(v) if v.trim().is_empty() || v.trim() == "off" => None,
+            Ok(v) => Some(PathBuf::from(v.trim())),
+            Err(_) => Some(PathBuf::from("/dev/dri/renderD128")),
+        };
+
         let jwt_secret = match std::env::var("JWT_SECRET") {
             Ok(s) if !s.trim().is_empty() => s,
             _ => load_or_create_jwt_secret(&database_url)?,
@@ -99,6 +109,7 @@ impl Config {
             cache_dir,
             strict_auth,
             ffmpeg_max_runs,
+            vaapi_device,
             jwt_secret,
         })
     }

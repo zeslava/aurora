@@ -73,6 +73,7 @@ cargo build --release
 | `TMDB_LANGUAGE` | `ru-RU` | Язык метаданных TMDB |
 | `CACHE_DIR` | `./cache` | Кэш обложек (`<CACHE_DIR>/images`) |
 | `FFMPEG_MAX_RUNS` | `4` | Сколько ffmpeg-ранов HLS идёт одновременно; сверх лимита новый просмотр глушит раны файла, который дольше всех не запрашивали |
+| `VAAPI_DEVICE` | `/dev/dri/renderD128` | Видео перекодирует iGPU через VAAPI (1080p, HDR → SDR), если пробное кодирование на старте прошло; `off` — только CPU (libx264) |
 | `LOG_LEVEL` | `info` | Уровень логирования |
 | `STATIC_DIR` | — | Для разработки: читать статику с диска вместо вшитой в бинарь |
 

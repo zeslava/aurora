@@ -35,6 +35,7 @@ TV apps are thin shells over `frontend/webos/index.html` (the SPA comes from the
 - `LOG_LEVEL`
 - `TMDB_API_KEY` — TMDB v3 key; without it cover art is disabled and the UI falls back to generated placeholders
 - `TMDB_LANGUAGE` (default `ru-RU`)
+- `VAAPI_DEVICE` (default `/dev/dri/renderD128`; `off` disables) — iGPU used for video transcoding when a test encode passes at startup; otherwise libx264 on CPU. See `docs/decisions/0011-vaapi-video-encode.md`
 - `CACHE_DIR` (default `./cache`) — downloaded posters/backdrops live in `<CACHE_DIR>/images`
 
 ## Architecture

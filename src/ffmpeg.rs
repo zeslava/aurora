@@ -159,6 +159,155 @@ pub fn probe_video_span_seconds(file_path: &Path) -> Result<f64> {
     Ok(last - first)
 }
 
+/// Видеопоток источника в той части, от которой зависит конвейер на GPU: что умеет
+/// декодировать сам iGPU и нужен ли тонмаппинг. На решение copy|transcode и на карту
+/// сегментов не влияет, поэтому в БД не хранится — читается при запуске рана.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SourceVideo {
+    pub codec: String,
+    pub pix_fmt: String,
+    pub color_transfer: String,
+}
+
+impl SourceVideo {
+    /// HDR10/Dolby Vision с HDR10-слоем (PQ) и HLG. Без тонмаппинга такой поток выходит из
+    /// SDR-кодировщика блёклым: значения остаются в PQ/bt2020, а показываются как bt709.
+    pub fn is_hdr(&self) -> bool {
+        matches!(self.color_transfer.as_str(), "smpte2084" | "arib-std-b67")
+    }
+
+    fn is_10bit(&self) -> bool {
+        self.pix_fmt.contains("10le") || self.pix_fmt.contains("10be")
+    }
+
+    /// Декодирует ли поток сам iGPU (Intel Gen9+, драйвер iHD). Остальное декодирует CPU
+    /// и загружает кадры на GPU. Угадывать нельзя: `-hwaccel` на неподдержанном профиле
+    /// молча откатывается на программный декодер, и кадры приходят в `scale_vaapi` из
+    /// обычной памяти — ран падает.
+    fn gpu_decodable(&self) -> bool {
+        let yuv420 = matches!(
+            self.pix_fmt.as_str(),
+            "yuv420p" | "yuvj420p" | "nv12" | "yuv420p10le" | "p010le"
+        );
+        let codec = match self.codec.as_str() {
+            "hevc" | "vp9" => true,
+            // H.264 10-bit (Hi10P) аппаратного декодера нет ни у одного поколения Intel.
+            "h264" | "mpeg2video" | "vc1" => !self.is_10bit(),
+            _ => false,
+        };
+        yuv420 && codec
+    }
+}
+
+/// `codec_name`, `pix_fmt` и `color_transfer` первого видеопотока. Читает заголовки
+/// контейнера, без декодирования.
+pub fn probe_source_video(file_path: &Path) -> Result<SourceVideo> {
+    let output = Command::new(FFPROBE_BIN)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt,color_transfer",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(file_path)
+        .output()
+        .context("Не удалось запустить ffprobe для видеопотока")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "ffprobe завершился с ошибкой при чтении видеопотока: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut source = SourceVideo::default();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        match line.split_once('=') {
+            Some(("codec_name", v)) => source.codec = v.to_string(),
+            Some(("pix_fmt", v)) => source.pix_fmt = v.to_string(),
+            Some(("color_transfer", v)) => source.color_transfer = v.to_string(),
+            _ => {}
+        }
+    }
+    Ok(source)
+}
+
+/// Кодирует ли VAAPI на `device` H.264 на самом деле. Устройства мало: без драйвера
+/// (`libva-intel-media-driver`) `/dev/dri` есть, а кодировать нечем.
+pub fn vaapi_h264_works(device: &Path) -> bool {
+    let mut args = base_args();
+    push(&mut args, "-init_hw_device", vaapi_device_arg(device));
+    push(&mut args, "-filter_hw_device", "va");
+    push(&mut args, "-f", "lavfi");
+    push(&mut args, "-i", "testsrc=size=320x240:rate=25:duration=0.2");
+    push(&mut args, "-vf", "format=nv12,hwupload");
+    push(&mut args, "-c:v", "h264_vaapi");
+    push(&mut args, "-f", "null");
+    args.push(OsString::from("-"));
+    Command::new(FFMPEG_BIN)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn vaapi_device_arg(device: &Path) -> OsString {
+    let mut arg = OsString::from("vaapi=va:");
+    arg.push(device);
+    arg
+}
+
+/// Предел кадра на GPU-конвейере. Перекодирование идёт для браузера, а 4K в H.264 на iGPU
+/// вдвое медленнее 1080p (замер на UHD 630: 2.8× против 6.0×) и раздувает сегменты.
+const VAAPI_MAX_WIDTH: u32 = 1920;
+const VAAPI_MAX_HEIGHT: u32 = 1080;
+
+/// Чем кодируется видео в ране с перекодированием.
+#[derive(Debug, Clone, Copy)]
+pub enum VideoEncoder<'a> {
+    /// libx264 на CPU. Источник не уменьшается, тонмаппинга нет: в сборке ffmpeg из pkg
+    /// нет `zscale`, а без него HDR в SDR не перевести.
+    Software,
+    /// Декодирование, уменьшение до 1080p, тонмаппинг HDR и H.264 на iGPU. Замер на
+    /// i7-9700T (UHD 630), 4K HEVC 10-bit HDR: 5.2× реального времени при ~0.4 ядра против
+    /// 1.36× при семи ядрах у libx264 в 4K. См. docs/decisions/0011.
+    Vaapi {
+        device: &'a Path,
+        source: &'a SourceVideo,
+    },
+}
+
+/// Фильтры GPU-конвейера.
+fn vaapi_filters(source: &SourceVideo, deinterlace: bool) -> String {
+    let mut chain = Vec::new();
+    if !source.gpu_decodable() {
+        // 10 бит грузим как есть: тонмаппингу нужен p010, а в 8 бит сведёт scale_vaapi.
+        let format = if source.is_10bit() { "p010" } else { "nv12" };
+        chain.push(format!("format={format},hwupload"));
+    }
+    if deinterlace {
+        // rate=frame — кадр на пару полей, как yadif=mode=0 у CPU-конвейера.
+        chain.push("deinterlace_vaapi=rate=frame".to_string());
+    }
+    let tonemap = source.is_hdr();
+    // Уменьшаем до тонмаппинга: tonemap_vaapi на 4K-кадре вдвое медленнее, чем на 1080p
+    // (замер: 2.5× против 5.2×). Поэтому scale оставляет 10 бит, если дальше тонмаппинг.
+    // Запятые в min() экранированы — иначе граф фильтров разрежет по ним выражение.
+    chain.push(format!(
+        "scale_vaapi=w=min(iw\\,{VAAPI_MAX_WIDTH}):h=min(ih\\,{VAAPI_MAX_HEIGHT})\
+         :force_original_aspect_ratio=decrease:force_divisible_by=2:format={}",
+        if tonemap { "p010" } else { "nv12" }
+    ));
+    if tonemap {
+        chain.push("tonemap_vaapi=format=nv12:t=bt709:m=bt709:p=bt709".to_string());
+    }
+    chain.join(",")
+}
+
 /// Прогрессивная отдача fMP4 в stdout с перекодированием аудио — старый (не-HLS) путь
 /// воспроизведения.
 pub struct AudioTranscodeStream<'a> {
@@ -216,17 +365,28 @@ pub struct HlsEncodeRun<'a> {
     /// Ограничение длительности рана. Задаётся только для init-рана, который стартует
     /// с нуля файла: под `-copyts -start_at_zero` `-t` отсчитывается по исходной шкале
     /// таймстемпов, поэтому для рана с середины он обрезал бы выход почти сразу
-    /// (замер: 1 пакет вместо 250). См. docs/decisions/0005.
+    /// (замер: 1 пакет вместо 250), а `h264_vaapi` на таком пустом выходе падает с
+    /// segfault. См. docs/decisions/0005 и 0011.
     pub max_seconds: Option<f64>,
     pub segment_seconds: f64,
     pub init_name: &'a str,
     /// Номер аудиодорожки среди аудиопотоков файла.
     pub audio_index: u32,
+    pub encoder: VideoEncoder<'a>,
 }
 
 impl HlsEncodeRun<'_> {
     pub fn to_args(&self) -> Vec<OsString> {
         let mut args = base_args();
+        if let VideoEncoder::Vaapi { device, source } = self.encoder {
+            push(&mut args, "-init_hw_device", vaapi_device_arg(device));
+            push(&mut args, "-filter_hw_device", "va");
+            if source.gpu_decodable() {
+                push(&mut args, "-hwaccel", "vaapi");
+                push(&mut args, "-hwaccel_device", "va");
+                push(&mut args, "-hwaccel_output_format", "vaapi");
+            }
+        }
         if self.start_time > 0.0 {
             push(&mut args, "-ss", format!("{:.6}", self.start_time));
         }
@@ -235,13 +395,23 @@ impl HlsEncodeRun<'_> {
         push(&mut args, "-map", format!("0:a:{}", self.audio_index));
 
         // Фильтр идёт до кодека: yadif работает над декодированными кадрами.
-        if self.deinterlace {
-            push(&mut args, "-vf", "yadif=mode=0");
+        match self.encoder {
+            VideoEncoder::Software => {
+                if self.deinterlace {
+                    push(&mut args, "-vf", "yadif=mode=0");
+                }
+                push(&mut args, "-c:v", "libx264");
+                push(&mut args, "-preset", "veryfast");
+                push(&mut args, "-crf", "23");
+                push(&mut args, "-pix_fmt", "yuv420p");
+            }
+            VideoEncoder::Vaapi { source, .. } => {
+                push(&mut args, "-vf", vaapi_filters(source, self.deinterlace));
+                push(&mut args, "-c:v", "h264_vaapi");
+                push(&mut args, "-qp", "23");
+                // -pix_fmt здесь нельзя: кадры живут в памяти GPU, формат задал scale_vaapi.
+            }
         }
-        push(&mut args, "-c:v", "libx264");
-        push(&mut args, "-preset", "veryfast");
-        push(&mut args, "-crf", "23");
-        push(&mut args, "-pix_fmt", "yuv420p");
         // `t` в этом выражении отсчитывается от начала рана, а не от начала файла: `-copyts`
         // влияет на записываемые таймстемпы, но `-start_at_zero` держит внутреннее время
         // относительным. Сдвиг на start_time (казавшийся очевидным) делал выражение всегда
@@ -449,6 +619,7 @@ mod tests {
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
                 audio_index: 0,
+                encoder: VideoEncoder::Software,
             }
             .to_args(),
         );
@@ -472,6 +643,7 @@ mod tests {
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
                 audio_index: 0,
+                encoder: VideoEncoder::Software,
             }
             .to_args(),
         );
@@ -493,6 +665,7 @@ mod tests {
                 segment_seconds: 6.0,
                 init_name: "init.10.tmp.mp4",
                 audio_index: 0,
+                encoder: VideoEncoder::Software,
             }
             .to_args(),
         );
@@ -526,6 +699,7 @@ mod tests {
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
                 audio_index: 0,
+                encoder: VideoEncoder::Software,
             }
             .to_args(),
         );
@@ -558,6 +732,7 @@ mod tests {
                 segment_seconds: 6.0,
                 init_name: "init.0.tmp.mp4",
                 audio_index: 0,
+                encoder: VideoEncoder::Software,
             }
             .to_args(),
         );
@@ -585,6 +760,104 @@ mod tests {
         assert!(index_of(&args, "-ss") < index_of(&args, "-i"));
         assert_eq!(args[index_of(&args, "-t") + 1], "120");
         assert_eq!(args.last().unwrap(), "-");
+    }
+
+    fn vaapi_run_args(source: &SourceVideo, deinterlace: bool) -> Vec<String> {
+        strs(
+            &HlsEncodeRun {
+                input: Path::new("/m/f.mkv"),
+                dir: Path::new("/tmp/c"),
+                start_time: 60.0,
+                start_index: 10,
+                transcode_audio: true,
+                deinterlace,
+                max_seconds: None,
+                segment_seconds: 6.0,
+                init_name: "init.10.tmp.mp4",
+                audio_index: 0,
+                encoder: VideoEncoder::Vaapi {
+                    device: Path::new("/dev/dri/renderD128"),
+                    source,
+                },
+            }
+            .to_args(),
+        )
+    }
+
+    fn hdr_hevc() -> SourceVideo {
+        SourceVideo {
+            codec: "hevc".into(),
+            pix_fmt: "yuv420p10le".into(),
+            color_transfer: "smpte2084".into(),
+        }
+    }
+
+    /// Аппаратный декодер — входная опция: после -i она относилась бы к выходу и молча
+    /// не сработала бы. Тонмаппинг идёт после уменьшения: на 4K-кадре он вдвое медленнее.
+    #[test]
+    fn vaapi_hdr_run_decodes_on_gpu_and_tonemaps_after_scale() {
+        let args = vaapi_run_args(&hdr_hevc(), false);
+
+        assert!(index_of(&args, "-hwaccel") < index_of(&args, "-i"));
+        assert!(index_of(&args, "-init_hw_device") < index_of(&args, "-hwaccel"));
+        let vf = &args[index_of(&args, "-vf") + 1];
+        let scale = vf.find("scale_vaapi").expect(vf);
+        let tonemap = vf.find("tonemap_vaapi").expect(vf);
+        assert!(scale < tonemap, "{vf}");
+        assert!(vf[scale..tonemap].contains("format=p010"), "{vf}");
+        assert!(!vf.contains("hwupload"), "кадры уже на GPU: {vf}");
+        assert_eq!(args[index_of(&args, "-c:v") + 1], "h264_vaapi");
+        assert!(!args.contains(&"-pix_fmt".to_string()));
+        // Сетка сегментов та же, что у libx264: карта от кодировщика не зависит.
+        assert_eq!(
+            args[index_of(&args, "-force_key_frames") + 1],
+            "expr:gte(t,n_forced*6)"
+        );
+    }
+
+    #[test]
+    fn vaapi_sdr_run_has_no_tonemap() {
+        let source = SourceVideo {
+            codec: "hevc".into(),
+            pix_fmt: "yuv420p10le".into(),
+            color_transfer: "bt709".into(),
+        };
+        let args = vaapi_run_args(&source, false);
+        let vf = &args[index_of(&args, "-vf") + 1];
+        assert!(!vf.contains("tonemap"), "{vf}");
+        assert!(vf.contains("format=nv12"), "{vf}");
+    }
+
+    /// mpeg4 iGPU не декодирует: без -hwaccel, кадры загружаются на GPU первым фильтром.
+    #[test]
+    fn vaapi_run_uploads_frames_gpu_cannot_decode() {
+        let source = SourceVideo {
+            codec: "mpeg4".into(),
+            pix_fmt: "yuv420p".into(),
+            color_transfer: String::new(),
+        };
+        let args = vaapi_run_args(&source, true);
+        assert!(!args.contains(&"-hwaccel".to_string()), "{args:?}");
+        let vf = &args[index_of(&args, "-vf") + 1];
+        assert!(vf.starts_with("format=nv12,hwupload,"), "{vf}");
+        assert!(
+            vf.find("deinterlace_vaapi").unwrap() < vf.find("scale_vaapi").unwrap(),
+            "{vf}"
+        );
+    }
+
+    #[test]
+    fn gpu_decodes_neither_hi10p_nor_444() {
+        let src = |codec: &str, pix_fmt: &str| SourceVideo {
+            codec: codec.into(),
+            pix_fmt: pix_fmt.into(),
+            color_transfer: String::new(),
+        };
+        assert!(src("hevc", "yuv420p10le").gpu_decodable());
+        assert!(src("h264", "yuv420p").gpu_decodable());
+        assert!(!src("h264", "yuv420p10le").gpu_decodable());
+        assert!(!src("hevc", "yuv444p").gpu_decodable());
+        assert!(!src("av1", "yuv420p10le").gpu_decodable());
     }
 }
 
@@ -630,6 +903,7 @@ mod audio_track_tests {
                 segment_seconds: 6.0,
                 init_name: "init.mp4",
                 audio_index: 3,
+                encoder: VideoEncoder::Software,
             }
             .to_args(),
         );

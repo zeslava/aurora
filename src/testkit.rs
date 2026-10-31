@@ -58,6 +58,10 @@ pub enum VideoForm {
     /// Ось всплыла на DVB-рипе 720x576 tt — он проходил белый список кодеков и уходил
     /// в `-c:v copy`, давая рывки при 3.6 Mbit/s.
     H264Interlaced,
+    /// HEVC 10-bit HDR10 (PQ/bt2020), как у 4K WEB-DL. Ось всплыла на «Inside Out»: на CPU
+    /// такой файл кодируется медленнее реального времени, а без тонмаппинга выходит блёклым.
+    /// GPU-конвейер обязан перевести его в bt709.
+    HevcHdr10,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,8 +203,9 @@ impl Shape {
                 cmd.args(["-vf", "interlace=scan=tff"]);
                 cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
                 // Без этих флагов x264 закодирует поля как обычные кадры, и ffprobe
-                // покажет progressive — форма выродится.
-                cmd.args(["-flags", "+ilme+ildct", "-top", "1", "-bf", "0"]);
+                // покажет progressive — форма выродится. Порядок полей (tt) берётся из
+                // кадров `interlace`; `-top` для этого не нужен, а в ffmpeg 8 его убрали.
+                cmd.args(["-flags", "+ilme+ildct", "-bf", "0"]);
             }
             VideoForm::Mpeg4 => {
                 // Без B-кадров avi-мукссер проставляет pts всем пакетам, и форма `NoPts`
@@ -209,6 +214,24 @@ impl Shape {
                 // `-force_key_frames`, и заданная форма GOP не получается.
                 cmd.args(["-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-q:v", "5"]);
                 cmd.args(["-bf", "2", "-g", "10000"]);
+            }
+            VideoForm::HevcHdr10 => {
+                // Метаданные HDR10 нужны дважды: в контейнере (по ним сервер решает про
+                // тонмаппинг) и в SEI потока (по ним тонмаппит tonemap_vaapi). Метки цвета
+                // ставятся на кадры: ffmpeg 8 берёт их оттуда, а `-color_trc` у кодировщика
+                // молча игнорирует — форма выродилась бы в SDR.
+                cmd.args([
+                    "-vf",
+                    "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
+                ]);
+                cmd.args(["-c:v", "libx265", "-pix_fmt", "yuv420p10le"]);
+                cmd.args([
+                    "-x265-params",
+                    "log-level=error:bframes=0:scenecut=0:keyint=10000:hdr10=1\
+                     :colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc\
+                     :master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)\
+                     :max-cll=1000,400",
+                ]);
             }
         }
 
@@ -276,6 +299,15 @@ impl Shape {
             assert!(
                 matches!(order.as_str(), "tt" | "bb" | "tb" | "bt"),
                 "{}: ожидался чересстрочный источник, ffprobe говорит field_order={order}",
+                self.name
+            );
+        }
+
+        if self.video == VideoForm::HevcHdr10 {
+            let transfer = probe_color_transfer(path);
+            assert_eq!(
+                transfer, "smpte2084",
+                "{}: ожидался HDR10 (PQ), а форма выродилась в SDR",
                 self.name
             );
         }
@@ -376,6 +408,17 @@ impl Shape {
                 seconds: 30,
                 extra_audio: &[AudioForm::Aac, AudioForm::Mp3],
             },
+            // 4K WEB-DL «Inside Out»: HEVC 10-bit HDR10 + Dolby-звук. Видео перекодируется
+            // всегда; на GPU-конвейере ещё и тонмаппится.
+            Shape {
+                name: "webdl_hevc_hdr10_ac3",
+                video: VideoForm::HevcHdr10,
+                audio: AudioForm::Ac3,
+                timestamps: TimestampForm::Clean,
+                gop: GopForm::Uniform,
+                seconds: 30,
+                extra_audio: &[],
+            },
             // Аудио уже браузерное при неудобном видео: единственная комбинация, где
             // перекодируется видео, но не звук.
             Shape {
@@ -409,6 +452,15 @@ impl Packet {
 
 /// `field_order` первого видеопотока. Пустая строка, если ffprobe его не назвал.
 pub fn probe_field_order(path: &Path) -> String {
+    probe_stream_entry(path, "field_order")
+}
+
+/// `color_transfer` первого видеопотока: `smpte2084` у HDR10, `bt709` после тонмаппинга.
+pub fn probe_color_transfer(path: &Path) -> String {
+    probe_stream_entry(path, "color_transfer")
+}
+
+fn probe_stream_entry(path: &Path, entry: &str) -> String {
     let out = Command::new("ffprobe")
         .args([
             "-v",
@@ -416,7 +468,7 @@ pub fn probe_field_order(path: &Path) -> String {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=field_order",
+            &format!("stream={entry}"),
             "-of",
             "default=noprint_wrappers=1:nokey=1",
         ])
