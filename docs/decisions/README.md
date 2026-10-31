@@ -20,3 +20,4 @@
 - [0009 — Android TV-приложение — та же оболочка в WebView](0009-android-tv-shell.md)
 - [0010 — Docker-образ: ffmpeg из apk, без лишних пакетов](0010-docker-image-ffmpeg.md)
 - [0011 — Видео перекодирует iGPU (VAAPI), CPU остаётся запасным путём](0011-vaapi-video-encode.md)
+- [0012 — Профиль потока зависит от того, что умеет клиент](0012-client-capabilities.md)

@@ -32,7 +32,8 @@ Dolby Vision. HEVC и 10 бит браузер не играет, поэтому
 
 1. `ffmpeg::VideoEncoder::{Software, Vaapi}`. GPU-конвейер `HlsEncodeRun`:
    `-hwaccel vaapi` (если iGPU декодирует поток) → `deinterlace_vaapi` (если поля) →
-   `scale_vaapi` до вписывания в 1920×1080 → `tonemap_vaapi` в bt709 (если HDR) →
+   `scale_vaapi` до вписывания в экран клиента (ступени 720/1080/2160, без сведений о
+   клиенте — 1080, см. [0012](0012-client-capabilities.md)) → `tonemap_vaapi` в bt709 (если HDR) →
    `h264_vaapi -qp 23`. Сетка сегментов та же `-force_key_frames`, карта от кодировщика не
    зависит. Замер на реальном файле со звуком: 4.4× при ~0.9 ядра, 1.6 Мбит/с.
 2. Что декодирует iGPU, решает `SourceVideo::gpu_decodable` (HEVC/VP9 8/10 бит, H.264/MPEG-2/VC-1

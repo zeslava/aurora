@@ -95,6 +95,33 @@ impl AudioForm {
     }
 }
 
+/// Клиент — вторая сторона решения copy|transcode: один и тот же файл телевизор с HEVC
+/// получает как есть, а браузер без HEVC — перекодированным. Каждая форма источника
+/// проверяется на каждом клиенте.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientForm {
+    /// Ничего о себе не сообщает: старый клиент, нативный HLS. H.264 8-bit, 1080p.
+    Legacy,
+    /// 4K HDR-телевизор с аппаратным HEVC Main 10 (webOS, Android TV).
+    HevcHdrTv,
+}
+
+impl ClientForm {
+    pub const ALL: [ClientForm; 2] = [ClientForm::Legacy, ClientForm::HevcHdrTv];
+
+    /// Query плейлиста, которую шлёт такой клиент.
+    pub fn query(self) -> &'static str {
+        match self {
+            ClientForm::Legacy => "",
+            ClientForm::HevcHdrTv => "caps=hevc,hevc10,hdr&h=2160",
+        }
+    }
+
+    pub fn plays_hevc_hdr(self) -> bool {
+        self == ClientForm::HevcHdrTv
+    }
+}
+
 /// Точка в пространстве осей. Имя используется в сообщениях об ошибках, чтобы упавший
 /// матричный тест сразу показывал, какая комбинация сломалась.
 #[derive(Debug, Clone, Copy)]
@@ -458,6 +485,11 @@ pub fn probe_field_order(path: &Path) -> String {
 /// `color_transfer` первого видеопотока: `smpte2084` у HDR10, `bt709` после тонмаппинга.
 pub fn probe_color_transfer(path: &Path) -> String {
     probe_stream_entry(path, "color_transfer")
+}
+
+/// `codec_name` первого видеопотока.
+pub fn probe_codec(path: &Path) -> String {
+    probe_stream_entry(path, "codec_name")
 }
 
 fn probe_stream_entry(path: &Path, entry: &str) -> String {

@@ -5,7 +5,7 @@ use crate::metadata::extract_metadata;
 use crate::models::ContinueWatchingItem;
 use crate::models::{Library, MediaFile, MediaItem, MediaType, PlaybackState};
 use crate::scanner::scan_directory;
-use crate::segments::{self, SegmentMap, StreamProfile};
+use crate::segments::{self, ClientCaps, SegmentMap, StreamProfile};
 use crate::tmdb::TmdbClient;
 use crate::transcoder::{AudioTranscoder, HlsManager};
 use axum::{
@@ -275,9 +275,7 @@ fn request_token(req: &axum::extract::Request) -> Option<String> {
 /// Cross-origin запрос не доверенный даже из LAN: иначе любой сайт, открытый в домашнем
 /// браузере, управлял бы сервером от имени первого пользователя
 fn trusted_lan(config: &Config, peer: Option<SocketAddr>, headers: &HeaderMap) -> bool {
-    !config.strict_auth
-        && peer.is_some_and(|addr| auth::is_lan(addr.ip()))
-        && same_origin(headers)
+    !config.strict_auth && peer.is_some_and(|addr| auth::is_lan(addr.ip())) && same_origin(headers)
 }
 
 /// Без `Origin` — навигация, `<video>`/`<img>` или не браузер; иначе хост из `Origin`
@@ -1726,6 +1724,23 @@ fn needs_video_transcoding(
     codec_needs_transcode || is_10bit || is_interlaced(field_order)
 }
 
+/// HEVC, который клиент декодирует сам (`MediaSource.isTypeSupported` на его стороне), —
+/// копируется. HDR без HDR-экрана перекодируется: тонмаппинг на сервере предсказуемее, чем
+/// у браузера на SDR-экране. DV profile 5 перекодируется всегда, у него нет HDR10-слоя.
+/// См. docs/decisions/0012.
+fn client_decodes_hevc(source: &crate::ffmpeg::SourceVideo, caps: ClientCaps) -> bool {
+    if source.codec != "hevc" || source.is_dolby_vision_only() {
+        return false;
+    }
+    let depth_ok = match source.pix_fmt.as_str() {
+        "yuv420p" => caps.hevc,
+        "yuv420p10le" => caps.hevc10,
+        // 4:2:2, 4:4:4, 12 бит — профили RExt, браузеры их не декодируют.
+        _ => false,
+    };
+    depth_ok && (!source.is_hdr() || caps.hdr)
+}
+
 /// Чересстрочный источник. ffprobe отдаёт "progressive" для прогрессивного, "tt"/"bb"/"tb"/"bt"
 /// для полей и "unknown", когда определить не смог. Неизвестное считаем прогрессивным: иначе
 /// перекодировали бы всю библиотеку из-за отсутствующих метаданных.
@@ -1770,12 +1785,40 @@ async fn cached_segment_map(
     }))
 }
 
+/// Перекодировать ли видео для этого клиента. ffprobe нужен только HEVC-файлу и только
+/// клиенту, заявившему HEVC: остальным хватает метаданных из БД.
+async fn transcode_video_for(state: &AppState, media_file: &MediaFile, caps: ClientCaps) -> bool {
+    let legacy = needs_video_transcoding(
+        &media_file.video_codec,
+        &media_file.pix_fmt,
+        &media_file.field_order,
+    );
+    let hevc = media_file
+        .video_codec
+        .as_deref()
+        .is_some_and(|c| c.eq_ignore_ascii_case("hevc"));
+    if !legacy || !hevc || !(caps.hevc || caps.hevc10) || is_interlaced(&media_file.field_order) {
+        return legacy;
+    }
+    match state.hls.source_video(&media_file.file_path).await {
+        Ok(source) => !client_decodes_hevc(&source, caps),
+        Err(e) => {
+            tracing::warn!(
+                "Видеопоток {:?} не прочитан ({e}) — перекодируем",
+                media_file.file_path
+            );
+            true
+        }
+    }
+}
+
 /// Резолвит файл, выводит профиль потока и достаёт карту сегментов — из кэша БД,
 /// а при промахе строит через ffprobe и кэширует.
 async fn segment_map_for(
     state: &AppState,
     id: &str,
     audio: Option<u32>,
+    caps: ClientCaps,
 ) -> Result<(MediaFile, StreamProfile, SegmentMap), StatusCode> {
     let media_file = state
         .db
@@ -1786,14 +1829,11 @@ async fn segment_map_for(
 
     let audio_index = resolve_audio_index(&media_file, audio);
     let mut profile = StreamProfile {
-        transcode_video: needs_video_transcoding(
-            &media_file.video_codec,
-            &media_file.pix_fmt,
-            &media_file.field_order,
-        ),
+        transcode_video: transcode_video_for(state, &media_file, caps).await,
         transcode_audio: needs_audio_transcoding(&audio_codec_of(&media_file, audio_index)),
         deinterlace: is_interlaced(&media_file.field_order),
         audio_index,
+        max_height: caps.max_height,
     };
 
     if let Some(map) = cached_segment_map(state, media_file.id, profile).await? {
@@ -1853,15 +1893,17 @@ async fn hls_playlist_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, StatusCode> {
     let requested_audio = params.get("audio").and_then(|a| a.parse::<u32>().ok());
-    let (_media_file, profile, map) = segment_map_for(&state, &id, requested_audio).await?;
+    let caps = ClientCaps::from_query(&params);
+    let (_media_file, profile, map) = segment_map_for(&state, &id, requested_audio, caps).await?;
 
     tracing::info!(
-        "HLS плейлист: media={id} профиль={} сегментов={}",
+        "HLS плейлист: media={id} профиль={} клиент={} сегментов={}",
         profile.cache_key(),
+        caps.to_query(),
         map.count()
     );
 
-    let mut playlist = map.to_playlist(profile);
+    let mut playlist = with_query(&map.to_playlist(profile), &caps.to_query());
     if let Some(token) = params.get("token") {
         playlist = with_token(&playlist, token);
     }
@@ -1875,17 +1917,17 @@ async fn hls_playlist_handler(
 }
 
 /// Относительные URI сегментов не наследуют query плейлиста, а нативный HLS-плеер
-/// не даёт добавить заголовок — токен дописывается в каждый URI.
+/// не даёт добавить заголовок — токен и возможности клиента дописываются в каждый URI.
 /// URI сегментов и `init.mp4` всегда уже содержат `?` (см. `segments::segment_uri`).
-fn with_token(playlist: &str, token: &str) -> String {
-    let token = urlencoding_component(token);
+/// `query` должен быть уже экранирован.
+fn with_query(playlist: &str, query: &str) -> String {
     playlist
         .lines()
         .map(|line| {
             if line.starts_with("#EXT-X-MAP:URI=\"") {
-                line.replacen('?', &format!("?token={token}&"), 1)
+                line.replacen('?', &format!("?{query}&"), 1)
             } else if !line.is_empty() && !line.starts_with('#') {
-                format!("{line}&token={token}")
+                format!("{line}&{query}")
             } else {
                 line.to_string()
             }
@@ -1893,6 +1935,10 @@ fn with_token(playlist: &str, token: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
+}
+
+fn with_token(playlist: &str, token: &str) -> String {
+    with_query(playlist, &format!("token={}", urlencoding_component(token)))
 }
 
 /// JWT состоит из base64url и точек, но токен пришёл от клиента — экранируем всё прочее,
@@ -1915,7 +1961,8 @@ async fn hls_segment_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, StatusCode> {
     let requested_audio = params.get("a").and_then(|a| a.parse::<u32>().ok());
-    let (media_file, profile, map) = segment_map_for(&state, &id, requested_audio).await?;
+    let caps = ClientCaps::from_query(&params);
+    let (media_file, profile, map) = segment_map_for(&state, &id, requested_audio, caps).await?;
 
     // Плейлист помечен профилем, при котором он был отрендерен. Расхождение означает, что
     // у плеера на руках устаревший VOD-манифест (он их не перезапрашивает) — отвечаем 404,
@@ -2531,7 +2578,10 @@ mod tests {
 
     #[test]
     fn parse_range_explicit() {
-        assert_eq!(parse_range("bytes=100-200", 1000), ByteRange::Part(100, 200));
+        assert_eq!(
+            parse_range("bytes=100-200", 1000),
+            ByteRange::Part(100, 200)
+        );
     }
 
     #[test]
@@ -3144,15 +3194,24 @@ mod tests {
         state: &AppState,
         id: &str,
         dir: &std::path::Path,
+        client: &str,
     ) -> Vec<crate::testkit::SegmentUnderTest> {
-        let (status, _, body) =
-            get(state, &format!("/api/media/{id}/hls/playlist.m3u8"), None).await;
+        let (status, _, body) = get(
+            state,
+            &format!("/api/media/{id}/hls/playlist.m3u8?{client}"),
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "плейлист");
         let playlist = String::from_utf8_lossy(&body).to_string();
 
-        let init = if playlist.contains("#EXT-X-MAP") {
-            let (status, _, body) =
-                get(state, &format!("/api/media/{id}/hls/init.mp4"), None).await;
+        // URI init.mp4 берётся из плейлиста, как у плеера: в нём возможности клиента.
+        let init = if let Some(map) = playlist
+            .lines()
+            .find_map(|l| l.strip_prefix("#EXT-X-MAP:URI=\""))
+        {
+            let uri = map.trim_end_matches('"');
+            let (status, _, body) = get(state, &format!("/api/media/{id}/hls/{uri}"), None).await;
             assert_eq!(status, StatusCode::OK, "init.mp4");
             Some(body)
         } else {
@@ -3200,11 +3259,28 @@ mod tests {
             let file = shape.build(tmp.path());
             let (state, id) = state_for_shape(&file, &shape).await;
 
-            let out = tmp.path().join("out");
-            std::fs::create_dir_all(&out).unwrap();
-            let segments = fetch_segments(&state, &id, &out).await;
+            for client in crate::testkit::ClientForm::ALL {
+                let name = format!("{}@{client:?}", shape.name);
+                let out = tmp.path().join(format!("out-{client:?}"));
+                std::fs::create_dir_all(&out).unwrap();
+                let segments = fetch_segments(&state, &id, &out, client.query()).await;
 
-            crate::testkit::assert_playable(shape.name, &segments);
+                crate::testkit::assert_playable(&name, &segments);
+                // HEVC-клиент получает исходный поток: тот же кодек и HDR, без перекодирования.
+                if shape.video == crate::testkit::VideoForm::HevcHdr10 {
+                    let codec = crate::testkit::probe_codec(&segments[0].path);
+                    let want = if client.plays_hevc_hdr() {
+                        "hevc"
+                    } else {
+                        "h264"
+                    };
+                    assert_eq!(codec, want, "{name}: не тот видеокодек в сегменте");
+                    if client.plays_hevc_hdr() {
+                        let transfer = crate::testkit::probe_color_transfer(&segments[0].path);
+                        assert_eq!(transfer, "smpte2084", "{name}: HDR потерян при copy");
+                    }
+                }
+            }
         }
     }
 
@@ -3230,7 +3306,13 @@ mod tests {
 
             let out = tmp.path().join("out");
             std::fs::create_dir_all(&out).unwrap();
-            let segments = fetch_segments(&state, &id, &out).await;
+            let segments = fetch_segments(
+                &state,
+                &id,
+                &out,
+                crate::testkit::ClientForm::Legacy.query(),
+            )
+            .await;
 
             crate::testkit::assert_playable(shape.name, &segments);
             if shape.video == crate::testkit::VideoForm::HevcHdr10 {

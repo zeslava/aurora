@@ -11,6 +11,7 @@ import type {
   SeriesEpisodesResponse,
   HomeResponse,
 } from '../types';
+import { clientCapsQuery } from '../lib/clientCaps';
 
 // Адрес сервера, зашитый на этапе сборки (пусто = относительный URL / тот же origin)
 const BUILD_API_URL = import.meta.env.VITE_API_URL || '';
@@ -250,7 +251,10 @@ class ApiClient {
   }
 
   getHlsUrl(id: string, audioIndex = 0): string {
-    return this.withToken(`${this.baseUrl}/api/media/${id}/hls/playlist.m3u8?audio=${audioIndex}`);
+    const caps = clientCapsQuery();
+    return this.withToken(
+      `${this.baseUrl}/api/media/${id}/hls/playlist.m3u8?audio=${audioIndex}${caps ? `&${caps}` : ''}`,
+    );
   }
 
   // Абсолютный URL картинки: бэкенд отдаёт относительный путь, а в упакованном

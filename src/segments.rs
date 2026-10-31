@@ -24,8 +24,81 @@ const MIN_COPY_SEGMENT_SECONDS: f64 = 4.0;
 /// плейлиста некоторые плееры отрабатывают криво.
 const MIN_TAIL_SECONDS: f64 = 1.0;
 
-/// Профиль потока — что именно ffmpeg делает с дорожками. Выводится только из кодеков
-/// файла, поэтому одинаков для всех клиентов: телевизор и планшет делят один кэш сегментов.
+/// Ступени потолка высоты кадра при перекодировании. Клиент сообщает высоту своего экрана,
+/// а сервер округляет её вниз до ступени — так клиенты с похожими экранами делят один кэш.
+const HEIGHT_STEPS: [u32; 3] = [720, 1080, 2160];
+
+/// Потолок для клиента, который о себе ничего не сообщил: старый клиент, нативный HLS.
+pub const DEFAULT_MAX_HEIGHT: u32 = 1080;
+
+/// Что клиент умеет декодировать сам. Приходит в query плейлиста (`caps=hevc,hevc10,hdr&h=2160`),
+/// и в каждом URI сегмента повторяется — иначе обработчик сегмента вывел бы другой профиль.
+/// Без `caps` — H.264 8-bit и 1080p, как у клиента, который о себе молчит.
+/// См. docs/decisions/0012.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientCaps {
+    /// HEVC Main (8 бит).
+    pub hevc: bool,
+    /// HEVC Main 10.
+    pub hevc10: bool,
+    /// Экран показывает HDR (PQ/HLG) — HDR-источник можно отдать без тонмаппинга.
+    pub hdr: bool,
+    /// Потолок высоты кадра, уже округлённый до ступени из `HEIGHT_STEPS`.
+    pub max_height: u32,
+}
+
+impl Default for ClientCaps {
+    fn default() -> Self {
+        Self {
+            hevc: false,
+            hevc10: false,
+            hdr: false,
+            max_height: DEFAULT_MAX_HEIGHT,
+        }
+    }
+}
+
+impl ClientCaps {
+    pub fn from_query(params: &std::collections::HashMap<String, String>) -> Self {
+        let mut caps = Self::default();
+        if let Some(list) = params.get("caps") {
+            for cap in list.split(',') {
+                match cap {
+                    "hevc" => caps.hevc = true,
+                    "hevc10" => caps.hevc10 = true,
+                    "hdr" => caps.hdr = true,
+                    _ => {}
+                }
+            }
+        }
+        if let Some(height) = params.get("h").and_then(|h| h.parse::<u32>().ok()) {
+            caps.max_height = HEIGHT_STEPS
+                .iter()
+                .rev()
+                .copied()
+                .find(|step| *step <= height)
+                .unwrap_or(HEIGHT_STEPS[0]);
+        }
+        caps
+    }
+
+    /// Та же запись, что разбирает [`Self::from_query`], — для URI сегментов.
+    pub fn to_query(self) -> String {
+        let caps: Vec<&str> = [
+            (self.hevc, "hevc"),
+            (self.hevc10, "hevc10"),
+            (self.hdr, "hdr"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        format!("caps={}&h={}", caps.join(","), self.max_height)
+    }
+}
+
+/// Профиль потока — что именно ffmpeg делает с дорожками. Выводится из кодеков файла и
+/// возможностей клиента ([`ClientCaps`]): телевизор с HEVC получает исходное видео, браузер
+/// без HEVC — перекодированное. Клиенты с одинаковыми возможностями делят один кэш сегментов.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamProfile {
     pub transcode_video: bool,
@@ -37,6 +110,9 @@ pub struct StreamProfile {
     /// Номер аудиодорожки среди аудиопотоков файла (`-map 0:a:N`). У релизов с несколькими
     /// переводами их бывают десятки; выбор приходит от клиента параметром `?audio=`.
     pub audio_index: u32,
+    /// Потолок высоты кадра при перекодировании (из [`ClientCaps::max_height`]). При
+    /// `-c:v copy` ни на что не влияет. На карту сегментов тоже: в [`Self::key`] не входит.
+    pub max_height: u32,
 }
 
 impl StreamProfile {
@@ -64,7 +140,8 @@ impl StreamProfile {
     /// (`-force_key_frames`), и hls-муксер режет ровно по ним. При `-c:v copy` резать можно
     /// только по keyframe источника, и единственный муксер, который принимает готовый список
     /// точек реза, — `segment`; с ним берём MPEG-TS: он не требует init-сегмента и одинаков
-    /// для всех ранов. H.264 (единственный кодек, доживающий до copy) в TS кладётся штатно.
+    /// для всех ранов. H.264 и HEVC (до copy доживают только они) в TS кладутся штатно, а
+    /// hls.js с 1.6 демуксит HEVC из TS.
     pub fn uses_fmp4(&self) -> bool {
         self.transcode_video
     }
@@ -438,12 +515,14 @@ mod tests {
         transcode_audio: true,
         deinterlace: false,
         audio_index: 0,
+        max_height: DEFAULT_MAX_HEIGHT,
     };
     const TS: StreamProfile = StreamProfile {
         transcode_video: false,
         transcode_audio: true,
         deinterlace: false,
         audio_index: 0,
+        max_height: DEFAULT_MAX_HEIGHT,
     };
 
     #[test]
@@ -537,6 +616,49 @@ mod tests {
         assert_ne!(first.cache_key(), second.cache_key());
     }
 
+    fn query(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn client_without_caps_gets_legacy_defaults() {
+        assert_eq!(ClientCaps::from_query(&query(&[])), ClientCaps::default());
+        assert_eq!(ClientCaps::default().max_height, 1080);
+    }
+
+    /// Высота округляется вниз до ступени: экраны 1440p и 1080p делят один кэш, а
+    /// телефон с экраном меньше 720 не получает кадр мельче 720.
+    #[test]
+    fn client_height_snaps_down_to_step() {
+        for (height, want) in [
+            ("2160", 2160),
+            ("1440", 1080),
+            ("1080", 1080),
+            ("900", 720),
+            ("480", 720),
+        ] {
+            let caps = ClientCaps::from_query(&query(&[("h", height)]));
+            assert_eq!(caps.max_height, want, "h={height}");
+        }
+    }
+
+    #[test]
+    fn client_caps_survive_query_roundtrip() {
+        let caps = ClientCaps::from_query(&query(&[("caps", "hevc10,hdr,av1"), ("h", "2160")]));
+        assert!(caps.hevc10 && caps.hdr && !caps.hevc);
+
+        let parsed: std::collections::HashMap<String, String> = caps
+            .to_query()
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(ClientCaps::from_query(&parsed), caps);
+    }
+
     #[test]
     fn profile_keys_are_distinct() {
         let keys: Vec<&str> = [(false, false), (false, true), (true, false), (true, true)]
@@ -547,6 +669,7 @@ mod tests {
                     transcode_audio: a,
                     deinterlace: false,
                     audio_index: 0,
+                    max_height: DEFAULT_MAX_HEIGHT,
                 }
                 .key()
             })

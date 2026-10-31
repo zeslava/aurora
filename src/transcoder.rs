@@ -215,7 +215,8 @@ impl FileCache {
 ///
 /// Кодировщик тоже входит в ключ: init.mp4 от `h264_vaapi` и сегменты от libx264 в одном
 /// каталоге плеер не склеит, а каталог переживает рестарт, после которого GPU мог
-/// появиться или пропасть.
+/// появиться или пропасть. На GPU в ключ входит и потолок кадра: init.mp4 разного
+/// разрешения тоже не склеить. libx264 кадр не уменьшает — там потолок кэш не делит.
 fn cache_key(
     file_id: u64,
     profile: segments::StreamProfile,
@@ -236,7 +237,11 @@ fn cache_key(
                 .hash(&mut hasher);
         }
     }
-    let encoder = if on_gpu { "-vaapi" } else { "" };
+    let encoder = if on_gpu {
+        format!("-vaapi{}", profile.max_height)
+    } else {
+        String::new()
+    };
     format!(
         "{file_id}-{}{encoder}-{:016x}",
         profile.cache_key(),
@@ -262,6 +267,9 @@ pub struct HlsManager {
     max_runs: usize,
     /// Render-устройство VAAPI, проверенное на старте. `None` — видео кодирует libx264.
     vaapi: Option<PathBuf>,
+    /// Видеопотоки, прочитанные ради выбора профиля. Профиль выводится на каждый запрос
+    /// сегмента, а ffprobe на каждый сегмент — лишний процесс.
+    sources: Arc<StdMutex<HashMap<PathBuf, ffmpeg::SourceVideo>>>,
 }
 
 impl HlsManager {
@@ -284,7 +292,25 @@ impl HlsManager {
             root,
             max_runs: DEFAULT_MAX_RUNS,
             vaapi: None,
+            sources: Arc::new(StdMutex::new(HashMap::new())),
         }
+    }
+
+    /// Видеопоток файла по заголовкам, с кэшем в памяти.
+    pub async fn source_video(&self, file_path: &Path) -> Result<ffmpeg::SourceVideo> {
+        // Мьютекс не отравляется паникой внутри: под ним только get/insert в HashMap.
+        if let Some(source) = self.sources.lock().unwrap().get(file_path) {
+            return Ok(source.clone());
+        }
+        let path = file_path.to_path_buf();
+        let source = tokio::task::spawn_blocking(move || ffmpeg::probe_source_video(&path))
+            .await
+            .context("ffprobe видеопотока не завершился")??;
+        self.sources
+            .lock()
+            .unwrap()
+            .insert(file_path.to_path_buf(), source.clone());
+        Ok(source)
     }
 
     /// Перекодировать видео на iGPU через `device`. Устройство должно быть уже проверено
@@ -646,7 +672,7 @@ async fn spawn_run(
             max_seconds: None,
             segment_seconds: segments::GRID_SEGMENT_SECONDS,
             init_name: &init_name,
-            encoder: video_encoder(vaapi, source.as_ref()),
+            encoder: video_encoder(vaapi, source.as_ref(), profile.max_height),
         }
         .to_args(),
     );
@@ -725,7 +751,7 @@ async fn spawn_init_run(
             max_seconds: Some(segments::GRID_SEGMENT_SECONDS),
             segment_seconds: segments::GRID_SEGMENT_SECONDS,
             init_name,
-            encoder: video_encoder(vaapi, source.as_ref()),
+            encoder: video_encoder(vaapi, source.as_ref(), profile.max_height),
         }
         .to_args(),
     );
@@ -784,9 +810,14 @@ async fn gpu_source(file_path: &Path, vaapi: Option<&Path>) -> Result<Option<ffm
 fn video_encoder<'a>(
     vaapi: Option<&'a Path>,
     source: Option<&'a ffmpeg::SourceVideo>,
+    max_height: u32,
 ) -> ffmpeg::VideoEncoder<'a> {
     match (vaapi, source) {
-        (Some(device), Some(source)) => ffmpeg::VideoEncoder::Vaapi { device, source },
+        (Some(device), Some(source)) => ffmpeg::VideoEncoder::Vaapi {
+            device,
+            source,
+            max_height,
+        },
         _ => ffmpeg::VideoEncoder::Software,
     }
 }
@@ -994,6 +1025,7 @@ mod tests {
         transcode_audio: false,
         deinterlace: false,
         audio_index: 0,
+        max_height: segments::DEFAULT_MAX_HEIGHT,
     };
 
     async fn add_run(cache: &Arc<AsyncMutex<FileCache>>) -> Arc<StdMutex<Option<String>>> {
@@ -1025,7 +1057,10 @@ mod tests {
         hls.enforce_run_limit(&c).await;
 
         assert!(a.lock().await.runs.is_empty(), "самый старый файл вытеснен");
-        assert!(failed_a.lock().unwrap().is_some(), "ожидающие получают ошибку");
+        assert!(
+            failed_a.lock().unwrap().is_some(),
+            "ожидающие получают ошибку"
+        );
         assert_eq!(b.lock().await.runs.len(), 1);
         assert!(failed_b.lock().unwrap().is_none());
         assert_eq!(c.lock().await.runs.len(), 1, "свой ран не трогаем");

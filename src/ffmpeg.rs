@@ -159,17 +159,25 @@ pub fn probe_video_span_seconds(file_path: &Path) -> Result<f64> {
     Ok(last - first)
 }
 
-/// Видеопоток источника в той части, от которой зависит конвейер на GPU: что умеет
-/// декодировать сам iGPU и нужен ли тонмаппинг. На решение copy|transcode и на карту
-/// сегментов не влияет, поэтому в БД не хранится — читается при запуске рана.
+/// Видеопоток источника в той части, от которой зависит конвейер на GPU (что умеет
+/// декодировать сам iGPU, нужен ли тонмаппинг) и copy HEVC клиенту, который его играет.
+/// В БД не хранится — читается по заголовкам при запуске рана или выборе профиля.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SourceVideo {
     pub codec: String,
     pub pix_fmt: String,
     pub color_transfer: String,
+    /// `dv_bl_signal_compatibility_id` из конфигурации Dolby Vision; `None` — DV нет.
+    pub dv_bl_compat: Option<u8>,
 }
 
 impl SourceVideo {
+    /// Dolby Vision без совместимого базового слоя (profile 5, IPTPQc2). Плеер без DV
+    /// показывает такой поток зелёно-фиолетовым, поэтому копировать его нельзя.
+    pub fn is_dolby_vision_only(&self) -> bool {
+        self.dv_bl_compat == Some(0)
+    }
+
     /// HDR10/Dolby Vision с HDR10-слоем (PQ) и HLG. Без тонмаппинга такой поток выходит из
     /// SDR-кодировщика блёклым: значения остаются в PQ/bt2020, а показываются как bt709.
     pub fn is_hdr(&self) -> bool {
@@ -209,7 +217,7 @@ pub fn probe_source_video(file_path: &Path) -> Result<SourceVideo> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=codec_name,pix_fmt,color_transfer",
+            "stream=codec_name,pix_fmt,color_transfer:stream_side_data=dv_bl_signal_compatibility_id",
             "-of",
             "default=noprint_wrappers=1",
         ])
@@ -230,6 +238,7 @@ pub fn probe_source_video(file_path: &Path) -> Result<SourceVideo> {
             Some(("codec_name", v)) => source.codec = v.to_string(),
             Some(("pix_fmt", v)) => source.pix_fmt = v.to_string(),
             Some(("color_transfer", v)) => source.color_transfer = v.to_string(),
+            Some(("dv_bl_signal_compatibility_id", v)) => source.dv_bl_compat = v.parse().ok(),
             _ => {}
         }
     }
@@ -261,28 +270,26 @@ fn vaapi_device_arg(device: &Path) -> OsString {
     arg
 }
 
-/// Предел кадра на GPU-конвейере. Перекодирование идёт для браузера, а 4K в H.264 на iGPU
-/// вдвое медленнее 1080p (замер на UHD 630: 2.8× против 6.0×) и раздувает сегменты.
-const VAAPI_MAX_WIDTH: u32 = 1920;
-const VAAPI_MAX_HEIGHT: u32 = 1080;
-
 /// Чем кодируется видео в ране с перекодированием.
 #[derive(Debug, Clone, Copy)]
 pub enum VideoEncoder<'a> {
     /// libx264 на CPU. Источник не уменьшается, тонмаппинга нет: в сборке ffmpeg из pkg
     /// нет `zscale`, а без него HDR в SDR не перевести.
     Software,
-    /// Декодирование, уменьшение до 1080p, тонмаппинг HDR и H.264 на iGPU. Замер на
-    /// i7-9700T (UHD 630), 4K HEVC 10-bit HDR: 5.2× реального времени при ~0.4 ядра против
-    /// 1.36× при семи ядрах у libx264 в 4K. См. docs/decisions/0011.
+    /// Декодирование, уменьшение до экрана клиента, тонмаппинг HDR и H.264 на iGPU. Замер на
+    /// i7-9700T (UHD 630), 4K HEVC 10-bit HDR → 1080p: 5.2× реального времени при ~0.4 ядра
+    /// против 1.36× при семи ядрах у libx264 в 4K. См. docs/decisions/0011.
     Vaapi {
         device: &'a Path,
         source: &'a SourceVideo,
+        /// Потолок высоты кадра; ширина — 16:9 от него. 4K в H.264 на iGPU вдвое медленнее
+        /// 1080p (2.8× против 6.0×), поэтому выше экрана клиента не кодируем.
+        max_height: u32,
     },
 }
 
 /// Фильтры GPU-конвейера.
-fn vaapi_filters(source: &SourceVideo, deinterlace: bool) -> String {
+fn vaapi_filters(source: &SourceVideo, deinterlace: bool, max_height: u32) -> String {
     let mut chain = Vec::new();
     if !source.gpu_decodable() {
         // 10 бит грузим как есть: тонмаппингу нужен p010, а в 8 бит сведёт scale_vaapi.
@@ -297,8 +304,9 @@ fn vaapi_filters(source: &SourceVideo, deinterlace: bool) -> String {
     // Уменьшаем до тонмаппинга: tonemap_vaapi на 4K-кадре вдвое медленнее, чем на 1080p
     // (замер: 2.5× против 5.2×). Поэтому scale оставляет 10 бит, если дальше тонмаппинг.
     // Запятые в min() экранированы — иначе граф фильтров разрежет по ним выражение.
+    let max_width = max_height * 16 / 9;
     chain.push(format!(
-        "scale_vaapi=w=min(iw\\,{VAAPI_MAX_WIDTH}):h=min(ih\\,{VAAPI_MAX_HEIGHT})\
+        "scale_vaapi=w=min(iw\\,{max_width}):h=min(ih\\,{max_height})\
          :force_original_aspect_ratio=decrease:force_divisible_by=2:format={}",
         if tonemap { "p010" } else { "nv12" }
     ));
@@ -378,7 +386,7 @@ pub struct HlsEncodeRun<'a> {
 impl HlsEncodeRun<'_> {
     pub fn to_args(&self) -> Vec<OsString> {
         let mut args = base_args();
-        if let VideoEncoder::Vaapi { device, source } = self.encoder {
+        if let VideoEncoder::Vaapi { device, source, .. } = self.encoder {
             push(&mut args, "-init_hw_device", vaapi_device_arg(device));
             push(&mut args, "-filter_hw_device", "va");
             if source.gpu_decodable() {
@@ -405,8 +413,14 @@ impl HlsEncodeRun<'_> {
                 push(&mut args, "-crf", "23");
                 push(&mut args, "-pix_fmt", "yuv420p");
             }
-            VideoEncoder::Vaapi { source, .. } => {
-                push(&mut args, "-vf", vaapi_filters(source, self.deinterlace));
+            VideoEncoder::Vaapi {
+                source, max_height, ..
+            } => {
+                push(
+                    &mut args,
+                    "-vf",
+                    vaapi_filters(source, self.deinterlace, max_height),
+                );
                 push(&mut args, "-c:v", "h264_vaapi");
                 push(&mut args, "-qp", "23");
                 // -pix_fmt здесь нельзя: кадры живут в памяти GPU, формат задал scale_vaapi.
@@ -778,6 +792,7 @@ mod tests {
                 encoder: VideoEncoder::Vaapi {
                     device: Path::new("/dev/dri/renderD128"),
                     source,
+                    max_height: 1080,
                 },
             }
             .to_args(),
@@ -789,6 +804,7 @@ mod tests {
             codec: "hevc".into(),
             pix_fmt: "yuv420p10le".into(),
             color_transfer: "smpte2084".into(),
+            dv_bl_compat: None,
         }
     }
 
@@ -821,11 +837,21 @@ mod tests {
             codec: "hevc".into(),
             pix_fmt: "yuv420p10le".into(),
             color_transfer: "bt709".into(),
+            dv_bl_compat: None,
         };
         let args = vaapi_run_args(&source, false);
         let vf = &args[index_of(&args, "-vf") + 1];
         assert!(!vf.contains("tonemap"), "{vf}");
         assert!(vf.contains("format=nv12"), "{vf}");
+    }
+
+    /// Потолок кадра — экран клиента, а не константа: 4K-экран без HEVC получает 4K.
+    #[test]
+    fn vaapi_scale_follows_client_height() {
+        let vf = vaapi_filters(&hdr_hevc(), false, 2160);
+        assert!(vf.contains("w=min(iw\\,3840):h=min(ih\\,2160)"), "{vf}");
+        let vf = vaapi_filters(&hdr_hevc(), false, 720);
+        assert!(vf.contains("w=min(iw\\,1280):h=min(ih\\,720)"), "{vf}");
     }
 
     /// mpeg4 iGPU не декодирует: без -hwaccel, кадры загружаются на GPU первым фильтром.
@@ -835,6 +861,7 @@ mod tests {
             codec: "mpeg4".into(),
             pix_fmt: "yuv420p".into(),
             color_transfer: String::new(),
+            dv_bl_compat: None,
         };
         let args = vaapi_run_args(&source, true);
         assert!(!args.contains(&"-hwaccel".to_string()), "{args:?}");
@@ -852,6 +879,7 @@ mod tests {
             codec: codec.into(),
             pix_fmt: pix_fmt.into(),
             color_transfer: String::new(),
+            dv_bl_compat: None,
         };
         assert!(src("hevc", "yuv420p10le").gpu_decodable());
         assert!(src("h264", "yuv420p").gpu_decodable());
