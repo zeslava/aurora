@@ -136,18 +136,18 @@
     }
   });
 
-  // Главный экран показываем только без фильтра
-  let showHome = $derived(filter === 'all' && !!home);
+  let continueWatching = $derived(home?.continue_watching ?? []);
 
   // Стартовый фокус — первая плитка «Продолжить просмотр», а без неё — первая карточка медиатеки
-  // (для навигации с пульта). Ждём ответа /home, иначе фокус уйдёт в сетку раньше, чем появится ряд.
+  // (для навигации с пульта). Ждём ответа /home и самого ряда: bind:element из Row может прийти
+  // позже bind:this сетки, и фокус ушёл бы в медиатеку.
   let continueRow = $state<HTMLElement | null>(null);
   let mediaGrid = $state<HTMLElement | null>(null);
   let initialFocusDone = false;
 
   $effect(() => {
     if (initialFocusDone || !homeLoaded) return;
-    const target = continueRow ?? mediaGrid;
+    const target = continueWatching.length > 0 ? continueRow : mediaGrid;
     if (!target) return;
     const first = target.querySelector<HTMLElement>('button, a[href], [tabindex]:not([tabindex="-1"])');
     if (!first) return;
@@ -176,27 +176,11 @@
       <PairTvModal onClose={() => (pairOpen = false)} />
     {/if}
 
-    <!-- Фильтры -->
-    <div class="container toolbar">
-      <div class="toolbar__filters">
-        <button onclick={() => (filter = 'all')} class="btn" class:btn--primary={filter === 'all'}>Все</button>
-        <button onclick={() => (filter = 'movie')} class="btn" class:btn--primary={filter === 'movie'}>Фильмы</button>
-        <button onclick={() => (filter = 'tvseries')} class="btn" class:btn--primary={filter === 'tvseries'}>
-          Сериалы
-        </button>
-      </div>
-      <select class="select" bind:value={sort} aria-label="Сортировка">
-        <option value="newest">Сначала новые</option>
-        <option value="title">По алфавиту</option>
-        <option value="title-desc">По алфавиту (Я–А)</option>
-      </select>
-    </div>
-
-    {#if showHome && home && home.continue_watching.length > 0}
-      <div class="container sections">
+    {#if continueWatching.length > 0}
+      <div class="container continue">
         <Section title="Продолжить просмотр">
           <Row bind:element={continueRow}>
-            {#each home.continue_watching as item (item.id)}
+            {#each continueWatching as item (item.id)}
               <ContinueCard {item} />
             {/each}
           </Row>
@@ -204,17 +188,33 @@
       </div>
     {/if}
 
-    <!-- Сетка медиа -->
     <div class="container library">
-      {#if filteredAndSortedMedia.length === 0}
-        <div class="empty">Медиатека пуста. Нажмите «Обновить».</div>
-      {:else}
-        <div class="media-grid" bind:this={mediaGrid}>
-          {#each filteredAndSortedMedia as item (item.id)}
-            <MediaCard media={item} progress={progressMap[item.id]} />
-          {/each}
+      <Section title="Медиатека">
+        <div class="toolbar">
+          <div class="toolbar__filters">
+            <button onclick={() => (filter = 'all')} class="btn" class:btn--primary={filter === 'all'}>Все</button>
+            <button onclick={() => (filter = 'movie')} class="btn" class:btn--primary={filter === 'movie'}>Фильмы</button>
+            <button onclick={() => (filter = 'tvseries')} class="btn" class:btn--primary={filter === 'tvseries'}>
+              Сериалы
+            </button>
+          </div>
+          <select class="select" bind:value={sort} aria-label="Сортировка">
+            <option value="newest">Сначала новые</option>
+            <option value="title">По алфавиту</option>
+            <option value="title-desc">По алфавиту (Я–А)</option>
+          </select>
         </div>
-      {/if}
+
+        {#if filteredAndSortedMedia.length === 0}
+          <div class="empty">Медиатека пуста. Нажмите «Обновить».</div>
+        {:else}
+          <div class="media-grid" bind:this={mediaGrid}>
+            {#each filteredAndSortedMedia as item (item.id)}
+              <MediaCard media={item} progress={progressMap[item.id]} />
+            {/each}
+          </div>
+        {/if}
+      </Section>
     </div>
   </div>
 {/if}
@@ -237,7 +237,7 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
-    padding-top: var(--space-6);
+    margin-bottom: var(--space-6);
   }
 
   .toolbar__filters {
@@ -245,15 +245,12 @@
     gap: var(--space-2);
   }
 
-  .sections {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-8);
+  .continue {
     padding-top: var(--space-6);
   }
 
   .library {
-    padding-block: var(--space-6);
+    padding-block: var(--space-8) var(--space-6);
   }
 
   .empty {

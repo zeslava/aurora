@@ -65,6 +65,12 @@
   // Кодек в верхнем регистре — так читабельнее
   const formatCodec = (codec?: string) => (codec ? codec.toUpperCase() : '');
 
+  // Стартовый фокус — на главной кнопке, чтобы с пульта сразу нажать «Смотреть»
+  let watchButton = $state<HTMLButtonElement | null>(null);
+  $effect(() => {
+    watchButton?.focus();
+  });
+
   let progressPercent = $derived(
     progress && media ? Math.round((progress.position / (media.duration || 1)) * 100) : 0
   );
@@ -93,10 +99,12 @@
         <!-- Кнопки -->
         <div class="hero__actions">
           {#if progress && progressPercent > 5}
-            <button onclick={handleWatch} class="btn btn--primary btn--large">Продолжить просмотр</button>
+            <button bind:this={watchButton} onclick={handleWatch} class="btn btn--primary btn--large">
+              Продолжить просмотр
+            </button>
             <button onclick={handleWatch} class="btn btn--large">Начать сначала</button>
           {:else}
-            <button onclick={handleWatch} class="btn btn--primary btn--large">Смотреть</button>
+            <button bind:this={watchButton} onclick={handleWatch} class="btn btn--primary btn--large">Смотреть</button>
           {/if}
         </div>
       </div>
