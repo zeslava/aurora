@@ -1,7 +1,8 @@
 FROM 15.1-RELEASE
 
-# ffmpeg/ffprobe обязательны: probe метаданных и транскодирование аудио
-RUN pkg install -y ffmpeg
+# ffmpeg/ffprobe обязательны: probe метаданных и транскодирование аудио.
+# libva-intel-media-driver — VAAPI для iGPU Intel (Gen9+); /dev/dri даёт ядро хоста (i915kms из drm-kmod)
+RUN pkg install -y ffmpeg libva-intel-media-driver
 
 SERVICE aurora
 LOG /var/log/aurora/aurora.log
