@@ -2460,6 +2460,7 @@ mod tests {
             gop: crate::testkit::GopForm::Uniform,
             seconds: 8,
             extra_audio: &[],
+            audio_start: crate::testkit::AudioStartForm::WithVideo,
         };
         let file = shape.build(tmp.path());
 
@@ -3282,6 +3283,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Перемотка запускает новый ран с середины файла. Его сегменты обязаны лежать на той же
+    /// шкале, что и сегменты рана с начала: в кэше они живут вперемешку с одним init.mp4.
+    #[tokio::test]
+    async fn run_from_middle_keeps_absolute_fragment_times() {
+        if !ffmpeg_available() {
+            eprintln!("SKIP: ffmpeg/ffprobe недоступны");
+            return;
+        }
+        let shape = crate::testkit::Shape::matrix()
+            .into_iter()
+            .find(|s| s.audio_start == crate::testkit::AudioStartForm::Late)
+            .expect("в матрице нет формы с поздним звуком");
+        let tmp = tempfile::tempdir().unwrap();
+        let file = shape.build(tmp.path());
+        let (state, id) = state_for_shape(&file, &shape).await;
+
+        let (status, _, body) =
+            get(&state, &format!("/api/media/{id}/hls/playlist.m3u8"), None).await;
+        assert_eq!(status, StatusCode::OK, "плейлист");
+        let playlist = String::from_utf8_lossy(&body).to_string();
+        let entries: Vec<(String, f64)> = playlist
+            .lines()
+            .zip(playlist.lines().skip(1))
+            .filter_map(|(info, name)| {
+                let extinf = info.strip_prefix("#EXTINF:")?.trim_end_matches(',');
+                Some((name.to_string(), extinf.parse().ok()?))
+            })
+            .collect();
+
+        let segments = fetch_named_segments(&state, &id, tmp.path(), &entries[2..]).await;
+        crate::testkit::assert_playable(shape.name, &segments);
     }
 
     /// Та же матрица, но видео перекодирует iGPU через VAAPI: hwaccel-декод (HEVC HDR,

@@ -95,6 +95,15 @@ impl AudioForm {
     }
 }
 
+/// Когда начинается звук относительно видео. Ось всплыла на XviD-рипе: первый блок AC3 в avi
+/// не декодируется, звук стартует на 1.2 c позже, и эта разница уходила в edit list `init.mp4`.
+/// MSE-плеер edit list не читал, и звук шёл на 1.2 c раньше картинки весь фильм.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioStartForm {
+    WithVideo,
+    Late,
+}
+
 /// Клиент — вторая сторона решения copy|transcode: один и тот же файл телевизор с HEVC
 /// получает как есть, а браузер без HEVC — перекодированным. Каждая форма источника
 /// проверяется на каждом клиенте.
@@ -136,6 +145,7 @@ pub struct Shape {
     /// переводами — до двух десятков дорожек разных кодеков и каналов; сервер должен
     /// уметь отдать любую, а не только первую.
     pub extra_audio: &'static [AudioForm],
+    pub audio_start: AudioStartForm,
 }
 
 impl Shape {
@@ -202,7 +212,10 @@ impl Shape {
         let tones: Vec<u32> = (0..=self.extra_audio.len())
             .map(|i| 440 + 220 * i as u32)
             .collect();
-        for tone in &tones {
+        for (i, tone) in tones.iter().enumerate() {
+            if i == 0 && self.audio_start == AudioStartForm::Late {
+                cmd.args(["-itsoffset", "1.2"]);
+            }
             cmd.args([
                 "-f",
                 "lavfi",
@@ -339,6 +352,15 @@ impl Shape {
             );
         }
 
+        if self.audio_start == AudioStartForm::Late {
+            let start = probe_first_audio_time(path);
+            assert!(
+                start > 1.0,
+                "{}: ожидался поздний звук, а он начинается на {start:.3} c",
+                self.name
+            );
+        }
+
         let keys: Vec<f64> = packets
             .iter()
             .filter(|p| p.key)
@@ -382,6 +404,7 @@ impl Shape {
                 gop: GopForm::Uniform,
                 seconds: 30,
                 extra_audio: &[],
+                audio_start: AudioStartForm::WithVideo,
             },
             // Breaking Bad: copy-видео, рваный GOP, dts=N/A в начале.
             Shape {
@@ -392,6 +415,7 @@ impl Shape {
                 gop: GopForm::Ragged,
                 seconds: 30,
                 extra_audio: &[],
+                audio_start: AudioStartForm::WithVideo,
             },
             // Gossip Girl: то же, но keyframes через 0.4 c — граничный случай схлопывания.
             Shape {
@@ -402,6 +426,7 @@ impl Shape {
                 gop: GopForm::Dense,
                 seconds: 30,
                 extra_audio: &[],
+                audio_start: AudioStartForm::WithVideo,
             },
             // Scooby Doo: avi без pts, mpeg4 → перекодирование видео, fMP4 + равномерная сетка.
             Shape {
@@ -412,6 +437,7 @@ impl Shape {
                 gop: GopForm::Ragged,
                 seconds: 30,
                 extra_audio: &[],
+                audio_start: AudioStartForm::WithVideo,
             },
             // ВОСЬМИДЕСЯТЫЕ (DVB): чересстрочный h264 + mp2 в MPEG-TS. Кодек браузерный,
             // поэтому до появления проверки field_order файл уходил в `-c:v copy`.
@@ -423,6 +449,7 @@ impl Shape {
                 gop: GopForm::Uniform,
                 seconds: 30,
                 extra_audio: &[],
+                audio_start: AudioStartForm::WithVideo,
             },
             // Мультиперевод: одна дорожка браузерная, остальные нет — сервер обязан
             // выбирать профиль по запрошенной дорожке, а не по первой.
@@ -434,6 +461,7 @@ impl Shape {
                 gop: GopForm::Uniform,
                 seconds: 30,
                 extra_audio: &[AudioForm::Aac, AudioForm::Mp3],
+                audio_start: AudioStartForm::WithVideo,
             },
             // 4K WEB-DL «Inside Out»: HEVC 10-bit HDR10 + Dolby-звук. Видео перекодируется
             // всегда; на GPU-конвейере ещё и тонмаппится.
@@ -445,6 +473,7 @@ impl Shape {
                 gop: GopForm::Uniform,
                 seconds: 30,
                 extra_audio: &[],
+                audio_start: AudioStartForm::WithVideo,
             },
             // Аудио уже браузерное при неудобном видео: единственная комбинация, где
             // перекодируется видео, но не звук.
@@ -456,6 +485,18 @@ impl Shape {
                 gop: GopForm::Ragged,
                 seconds: 30,
                 extra_audio: &[],
+                audio_start: AudioStartForm::WithVideo,
+            },
+            // XviD-рип «De l'autre cote du periph»: звук начинается позже видео.
+            Shape {
+                name: "xvid_mpeg4_ac3_late_audio",
+                video: VideoForm::Mpeg4,
+                audio: AudioForm::Ac3,
+                timestamps: TimestampForm::Clean,
+                gop: GopForm::Ragged,
+                seconds: 30,
+                extra_audio: &[],
+                audio_start: AudioStartForm::Late,
             },
         ]
     }
@@ -514,6 +555,97 @@ fn probe_stream_entry(path: &Path, entry: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+/// Время первого аудиопакета.
+fn probe_first_audio_time(path: &Path) -> f64 {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "a:0"])
+        .args(["-show_entries", "packet=pts_time"])
+        .args(["-read_intervals", "%+#1", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .expect("не удалось запустить ffprobe");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.trim().trim_end_matches(',').parse().ok())
+        .expect("нет аудиопакетов")
+}
+
+/// Начало первого фрагмента по `tfdt`: время, которое видит MSE-плеер. ffprobe применяет edit
+/// list из init и показывает другое, поэтому его таймстемпы сдвига между дорожками не выявят.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FragmentStart {
+    video: f64,
+    audio: f64,
+}
+
+/// `None`, если в файле нет `moof`: сегмент MPEG-TS.
+fn fragment_start(path: &Path) -> Option<FragmentStart> {
+    let bytes = std::fs::read(path).expect("не удалось прочитать сегмент");
+    let mut timescales = std::collections::HashMap::new();
+    let mut handlers = std::collections::HashMap::new();
+    let moov = find_box(&bytes, b"moov")?;
+    for trak in iter_boxes(moov).filter(|(kind, _)| kind == b"trak") {
+        let tkhd = find_box(trak.1, b"tkhd")?;
+        let id_at = if tkhd[0] == 1 { 20 } else { 12 };
+        let id = be_u32(&tkhd[id_at..]);
+        let mdia = find_box(trak.1, b"mdia")?;
+        let mdhd = find_box(mdia, b"mdhd")?;
+        let scale_at = if mdhd[0] == 1 { 20 } else { 12 };
+        timescales.insert(id, be_u32(&mdhd[scale_at..]) as f64);
+        handlers.insert(id, find_box(mdia, b"hdlr")?[8..12].to_vec());
+    }
+
+    let (mut video, mut audio) = (None, None);
+    let moof = find_box(&bytes, b"moof")?;
+    for traf in iter_boxes(moof).filter(|(kind, _)| kind == b"traf") {
+        let id = be_u32(&find_box(traf.1, b"tfhd")?[4..]);
+        let tfdt = find_box(traf.1, b"tfdt")?;
+        let decode_time = if tfdt[0] == 1 {
+            u64::from_be_bytes(tfdt[4..12].try_into().ok()?)
+        } else {
+            be_u32(&tfdt[4..]) as u64
+        };
+        let seconds = decode_time as f64 / timescales.get(&id)?;
+        match handlers.get(&id)?.as_slice() {
+            b"vide" => video = Some(seconds),
+            b"soun" => audio = Some(seconds),
+            _ => {}
+        }
+    }
+    Some(FragmentStart {
+        video: video?,
+        audio: audio?,
+    })
+}
+
+fn be_u32(bytes: &[u8]) -> u32 {
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+fn find_box<'a>(bytes: &'a [u8], wanted: &[u8; 4]) -> Option<&'a [u8]> {
+    iter_boxes(bytes)
+        .find(|(kind, _)| kind == wanted)
+        .map(|(_, body)| body)
+}
+
+/// Боксы одного уровня. 64-битный размер и «до конца файла» нашему муксеру не нужны.
+fn iter_boxes(mut bytes: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
+    std::iter::from_fn(move || {
+        if bytes.len() < 8 {
+            return None;
+        }
+        let size = be_u32(bytes) as usize;
+        if size < 8 || size > bytes.len() {
+            return None;
+        }
+        let kind = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        let body = &bytes[8..size];
+        bytes = &bytes[size..];
+        Some((kind, body))
+    })
 }
 
 pub fn probe_packets(path: &Path) -> Vec<Packet> {
@@ -658,5 +790,27 @@ pub fn assert_playable(shape_name: &str, segments: &[SegmentUnderTest]) {
             );
         }
         previous_end = Some((seg.name.clone(), last));
+
+        // 6. fMP4: дорожки стоят на одной шкале, и время абсолютное, в каком бы ране сегмент ни
+        //    родился. Иначе звук расходится с картинкой, хотя ffprobe и HTTP выглядят здоровыми.
+        if let Some(start) = fragment_start(&seg.path) {
+            let index: f64 = seg.name["segment".len().."segment00000".len()]
+                .parse()
+                .expect("номер сегмента в имени");
+            let expected = index * crate::segments::GRID_SEGMENT_SECONDS;
+            assert!(
+                (start.video - expected).abs() < 0.5,
+                "{shape_name}/{}: tfdt видео {:.3} c, а карта обещает {expected:.3} c",
+                seg.name,
+                start.video
+            );
+            assert!(
+                (start.audio - start.video).abs() < 0.25,
+                "{shape_name}/{}: tfdt звука {:.3} c, видео {:.3} c",
+                seg.name,
+                start.audio,
+                start.video
+            );
+        }
     }
 }

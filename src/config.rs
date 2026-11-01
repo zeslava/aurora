@@ -159,6 +159,9 @@ fn load_or_create_jwt_secret(database_url: &str) -> Result<String> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
     }
-    eprintln!("JWT_SECRET не задан — сгенерирован и сохранён в {}", path.display());
+    eprintln!(
+        "JWT_SECRET не задан — сгенерирован и сохранён в {}",
+        path.display()
+    );
     Ok(secret)
 }

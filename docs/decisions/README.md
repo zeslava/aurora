@@ -21,3 +21,4 @@
 - [0010 — Docker-образ: ffmpeg из apk, без лишних пакетов](0010-docker-image-ffmpeg.md)
 - [0011 — Видео перекодирует iGPU (VAAPI), CPU остаётся запасным путём](0011-vaapi-video-encode.md)
 - [0012 — Профиль потока зависит от того, что умеет клиент](0012-client-capabilities.md)
+- [0013 — Абсолютный `tfdt` во фрагментах fMP4](0013-absolute-fragment-times.md)

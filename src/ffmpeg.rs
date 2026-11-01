@@ -30,17 +30,29 @@ fn push(args: &mut Vec<OsString>, flag: &str, value: impl AsRef<OsStr>) {
     args.push(value.as_ref().to_os_string());
 }
 
+/// Как держать перекодированный звук на таймстемпах источника.
+#[derive(Clone, Copy)]
+enum AudioSync {
+    Off,
+    Async,
+    /// То же, плюс тишина от нуля до первого сэмпла. Только для рана с начала файла: у рана с
+    /// середины под `-copyts` это означало бы тишину длиной во всю пропущенную часть фильма.
+    AsyncFromZero,
+}
+
 /// Аргументы аудиокодека — одинаковы во всех заданиях, поэтому живут в одном месте:
 /// расхождение между профилями дало бы разное звучание одного файла в зависимости от того,
 /// каким путём он поехал.
-fn audio_args(transcode: bool, resample_async: bool) -> Vec<OsString> {
+fn audio_args(transcode: bool, sync: AudioSync) -> Vec<OsString> {
     let mut args = Vec::new();
     if transcode {
         push(&mut args, "-c:a", "aac");
         push(&mut args, "-b:a", "192k");
         push(&mut args, "-ac", "2");
-        if resample_async {
-            push(&mut args, "-af", "aresample=async=1");
+        match sync {
+            AudioSync::Off => {}
+            AudioSync::Async => push(&mut args, "-af", "aresample=async=1"),
+            AudioSync::AsyncFromZero => push(&mut args, "-af", "aresample=async=1:first_pts=0"),
         }
     } else {
         push(&mut args, "-c:a", "copy");
@@ -340,7 +352,7 @@ impl AudioTranscodeStream<'_> {
             push(&mut args, "-t", dur.to_string());
         }
         push(&mut args, "-c:v", "copy");
-        args.extend(audio_args(true, false));
+        args.extend(audio_args(true, AudioSync::Off));
         push(&mut args, "-ar", "48000");
         // Синхронизирует аудио после seek, добавляя тишину в начале если нужно.
         push(&mut args, "-af", "aresample=async=1:first_pts=0");
@@ -437,7 +449,13 @@ impl HlsEncodeRun<'_> {
             format!("expr:gte(t,n_forced*{})", self.segment_seconds),
         );
 
-        args.extend(audio_args(self.transcode_audio, true));
+        // Без тишины в начале у файла с поздним звуком буфер плеера начинался бы с дыры.
+        let sync = if self.start_time == 0.0 {
+            AudioSync::AsyncFromZero
+        } else {
+            AudioSync::Async
+        };
+        args.extend(audio_args(self.transcode_audio, sync));
 
         // Абсолютные таймстемпы каждого рана должны совпадать с картой сегментов — иначе плеер
         // положит сегмент не туда в буфере. НЕ ставить -avoid_negative_ts make_zero: он обнулил
@@ -461,6 +479,10 @@ impl HlsEncodeRun<'_> {
         // недописанный сегмент.
         push(&mut args, "-hls_flags", "temp_file");
         push(&mut args, "-hls_segment_type", "fmp4");
+        // Без frag_discont muxer считает tfdt каждой дорожки от её первого пакета, а разницу
+        // пишет в edit list init.mp4. hls.js edit list не читает, поэтому поздний звук играл бы
+        // раньше картинки, а init зависел бы от рана. См. docs/decisions/0013.
+        push(&mut args, "-hls_segment_options", "movflags=+frag_discont");
         push(&mut args, "-hls_fmp4_init_filename", self.init_name);
         push(
             &mut args,
@@ -519,7 +541,7 @@ impl CopySegment<'_> {
         push(&mut args, "-map", "0:v:0");
         push(&mut args, "-map", format!("0:a:{}", self.audio_index));
         push(&mut args, "-c:v", "copy");
-        args.extend(audio_args(self.transcode_audio, true));
+        args.extend(audio_args(self.transcode_audio, AudioSync::Async));
         push(&mut args, "-muxdelay", "0");
         push(&mut args, "-muxpreload", "0");
         push(&mut args, "-f", "mpegts");
@@ -738,13 +760,13 @@ mod tests {
             &HlsEncodeRun {
                 input: Path::new("/m/f.mkv"),
                 dir: Path::new("/tmp/c"),
-                start_time: 0.0,
-                start_index: 0,
+                start_time: 60.0,
+                start_index: 10,
                 transcode_audio: true,
                 deinterlace: false,
                 max_seconds: None,
                 segment_seconds: 6.0,
-                init_name: "init.0.tmp.mp4",
+                init_name: "init.10.tmp.mp4",
                 audio_index: 0,
                 encoder: VideoEncoder::Software,
             }
@@ -758,6 +780,32 @@ mod tests {
                 "аудио-рецепт разошёлся на {flag}"
             );
         }
+    }
+
+    /// Тишина до первого сэмпла нужна только там, где ран начинается с нуля файла.
+    #[test]
+    fn only_run_from_file_start_pads_audio_from_zero() {
+        let af = |start_time| {
+            let args = strs(
+                &HlsEncodeRun {
+                    input: Path::new("/m/f.mkv"),
+                    dir: Path::new("/tmp/c"),
+                    start_time,
+                    start_index: 0,
+                    transcode_audio: true,
+                    deinterlace: false,
+                    max_seconds: None,
+                    segment_seconds: 6.0,
+                    init_name: "init.0.tmp.mp4",
+                    audio_index: 0,
+                    encoder: VideoEncoder::Software,
+                }
+                .to_args(),
+            );
+            args[index_of(&args, "-af") + 1].clone()
+        };
+        assert_eq!(af(0.0), "aresample=async=1:first_pts=0");
+        assert_eq!(af(60.0), "aresample=async=1");
     }
 
     #[test]

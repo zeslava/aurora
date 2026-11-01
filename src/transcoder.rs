@@ -209,6 +209,9 @@ impl FileCache {
     }
 }
 
+/// Увеличивается, когда новые сегменты несовместимы с уже лежащими в кэше.
+const SEGMENT_RECIPE_VERSION: u32 = 2;
+
 /// Ключ кэша: id файла, профиль и отпечаток самого файла (путь + mtime + размер). Отпечаток
 /// обязателен — иначе подменённый на диске файл (или переиспользованный после пересканирования
 /// id) молча отдавался бы старыми сегментами из уцелевшей temp-директории.
@@ -217,6 +220,9 @@ impl FileCache {
 /// каталоге плеер не склеит, а каталог переживает рестарт, после которого GPU мог
 /// появиться или пропасть. На GPU в ключ входит и потолок кадра: init.mp4 разного
 /// разрешения тоже не склеить. libx264 кадр не уменьшает — там потолок кэш не делит.
+///
+/// Версия рецепта нужна по той же причине: сегменты живут дольше процесса и после смены рецепта
+/// склеились бы с init.mp4 другой шкалы времени.
 fn cache_key(
     file_id: u64,
     profile: segments::StreamProfile,
@@ -226,6 +232,7 @@ fn cache_key(
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    SEGMENT_RECIPE_VERSION.hash(&mut hasher);
     file_path.hash(&mut hasher);
     if let Ok(meta) = std::fs::metadata(file_path) {
         meta.len().hash(&mut hasher);
