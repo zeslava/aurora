@@ -58,6 +58,49 @@ cargo build --release
 Если установлен [Task](https://taskfile.dev), то же самое короче: `task install`,
 `task build`, `task run`. `task` без аргументов покажет все задачи.
 
+## FreeBSD (DAIL)
+
+После сборки фронтенда и `target/release/aurora` на FreeBSD замените
+`/path/to/media` и `/path/to/aurora-data` на свои каталоги медиатеки и данных:
+
+```bash
+doas dail run aurora.dail --env-file .env \
+  --mount /path/to/media:/media \
+  --mount /path/to/aurora-data:/var/db/aurora \
+  --network inherit --rebuild
+```
+
+### Отдельный демосервер
+
+Используется тот же `aurora.dail`: имя jail, порт и каталоги задаются при запуске.
+Замените `/path/to/aurora-demo` на свой каталог демосервера, создайте подкаталоги
+и положите в `media` один-два тестовых ролика:
+
+```bash
+mkdir -p /path/to/aurora-demo/data /path/to/aurora-demo/media
+
+doas dail run aurora.dail --name aurora-demo --env-file .env \
+  -e PORT=4001 \
+  -e DATABASE_URL=sqlite:/var/db/aurora/aurora.db \
+  -e MEDIA_PATHS=/media \
+  -e CACHE_DIR=/var/db/aurora/cache \
+  -e STRICT_AUTH=true \
+  -e JWT_SECRET= \
+  --mount /path/to/aurora-demo/media:/media:ro \
+  --mount /path/to/aurora-demo/data:/var/db/aurora \
+  --network inherit --rebuild
+```
+
+`-e` переопределяет значения из `.env` и Dailfile. Пустой `JWT_SECRET` создаёт
+отдельный ключ в каталоге данных демо. При `--network inherit` сервис слушает порт
+из `PORT`; проброс через PF не используется. `--name aurora-demo` направляет
+`--rebuild` на демо-jail; его БД и медиа лежат в отдельных каталогах.
+
+Перед открытием внешнего доступа зайдите на `http://<адрес-сервера>:4001`, создайте
+первого пользователя и обновите медиатеку. Для своего домена настройте reverse
+proxy на этот адрес со схемой `http`, HTTPS-сертификат и редирект HTTP → HTTPS.
+Обязательная авторизация включена и для запросов из LAN и прокси.
+
 ## Конфигурация
 
 Переменные окружения (читаются и из `.env`):
