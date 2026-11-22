@@ -22,7 +22,7 @@
   let streamUrl = $state('');
 
   // Экран, с которого открыли плеер (главная или страница сериала)
-  const backTo = router.previous ?? '/library';
+  const backTo = router.previous ?? '/';
 
   $effect(() => {
     const mediaId = id;

@@ -8,6 +8,8 @@ export type RouteName = 'login' | 'library' | 'media' | 'series' | 'watch' | 'no
 
 const PATTERNS: { name: RouteName; parts: string[] }[] = [
   { name: 'login', parts: ['login'] },
+  { name: 'library', parts: [] },
+  // Старые ссылки распознаём; App заменяет адрес на канонический '/'.
   { name: 'library', parts: ['library'] },
   { name: 'media', parts: ['media', ':id'] },
   { name: 'series', parts: ['series', ':id'] },
@@ -88,7 +90,7 @@ export const router = new Router();
 export const navigate = (to: string, options?: { replace?: boolean }) =>
   router.navigate(to, options);
 
-// Экшен для <a use:link href="/library">: перехватывает клик, не перезагружая страницу
+// Экшен для <a use:link href="/">: перехватывает клик, не перезагружая страницу
 export const link = (node: HTMLAnchorElement) => {
   const onClick = (e: MouseEvent) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;

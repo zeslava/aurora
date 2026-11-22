@@ -85,7 +85,7 @@
     <DetailBackdrop backdrop={media.backdrop} title={media.title} />
 
     <AppHeader transparent>
-      <button onclick={() => navigate('/library')} class="btn--back">← Назад к библиотеке</button>
+      <button onclick={() => navigate('/')} class="btn--back">← Назад к библиотеке</button>
     </AppHeader>
 
     <!-- Hero -->

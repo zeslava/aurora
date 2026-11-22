@@ -16,7 +16,7 @@
 
   // Из домашней сети вход уже выполнил auth при запуске — сюда попадают только снаружи
   $effect(() => {
-    if (auth.isAuthenticated) navigate('/library', { replace: true });
+    if (auth.isAuthenticated) navigate('/', { replace: true });
   });
 
   const switchMode = (next: Mode) => {
@@ -49,7 +49,7 @@
       } else {
         await auth.login({ username, password });
       }
-      navigate('/library', { replace: true });
+      navigate('/', { replace: true });
     } catch (err: any) {
       error =
         err.response?.data?.message ||
@@ -92,7 +92,7 @@
       <TvPairing
         onAuthenticated={(response) => {
           auth.loginWithResponse(response);
-          navigate('/library', { replace: true });
+          navigate('/', { replace: true });
         }}
       />
     {:else}

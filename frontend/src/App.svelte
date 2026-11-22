@@ -51,18 +51,16 @@
 
   let route = $derived(router.route);
 
-  // Защищённые маршруты: без токена уводим на экран входа
+  // Без токена уводим на вход; после проверки авторизации нормализуем адрес.
   $effect(() => {
     if (gate !== 'ready' || auth.loading) return;
-    if (!auth.isAuthenticated && route.name !== 'login') {
-      navigate('/login', { replace: true });
+    if (!auth.isAuthenticated) {
+      if (route.name !== 'login') navigate('/login', { replace: true });
+      return;
     }
-  });
-
-  // Корень и неизвестные пути ведут в библиотеку
-  $effect(() => {
-    if (gate === 'ready' && route.name === 'notfound') {
-      navigate('/library', { replace: true });
+    // /library и неизвестные пути ведут на главную без лишней записи в истории.
+    if (route.name === 'notfound' || (route.name === 'library' && router.path !== '/')) {
+      navigate('/', { replace: true });
     }
   });
 </script>
