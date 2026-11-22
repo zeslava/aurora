@@ -1,6 +1,6 @@
 {
   "id": "com.aurora.mediaserver",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "vendor": "Aurora",
   "type": "web",
   "main": "index.html",
