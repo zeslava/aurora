@@ -36,6 +36,8 @@ export interface MediaItem extends MediaFileInfo, TmdbInfo {
   title: string;
   custom_title?: string;
   year?: number;
+  end_year?: number;
+  ongoing?: boolean;
   type: MediaType;
   created_at?: string;
 }

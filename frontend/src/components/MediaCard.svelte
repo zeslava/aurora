@@ -1,6 +1,7 @@
 <script lang="ts">
   import MediaTile from './MediaTile.svelte';
   import { navigate } from '../lib/router.svelte';
+  import { formatMediaYears } from '../lib/mediaYears';
   import type { MediaItem, PlaybackState } from '../types';
 
   interface Props {
@@ -26,7 +27,7 @@
 <MediaTile
   title={media.title}
   poster={media.backdrop}
-  subtitle={media.year ? String(media.year) : null}
+  subtitle={formatMediaYears(media)}
   icon={media.type === 'tvseries' ? '📺' : '🎬'}
   actionLabel={progressPercent > 5 ? 'Продолжить' : 'Смотреть'}
   {progressPercent}

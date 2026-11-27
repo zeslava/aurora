@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::models::MediaType;
 use anyhow::{Context, Result};
+use chrono::Datelike;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,10 @@ pub struct TmdbMatch {
     pub media_type: MediaType,
     /// Локализованное название (`title` у фильма, `name` у сериала)
     pub title: Option<String>,
+    /// Год премьеры фильма или первого выхода сериала
+    pub year: Option<u32>,
+    pub end_year: Option<u32>,
+    pub ongoing: Option<bool>,
     pub overview: Option<String>,
     pub rating: Option<f64>,
     /// Путь постера на TMDB (например, "/abc.jpg")
@@ -38,8 +43,42 @@ pub struct TmdbSeason {
 }
 
 #[derive(Deserialize)]
-struct TvDetails {
-    seasons: Vec<TmdbSeason>,
+pub struct TvDetails {
+    #[serde(default)]
+    pub seasons: Vec<TmdbSeason>,
+    first_air_date: Option<String>,
+    last_air_date: Option<String>,
+    status: Option<String>,
+    in_production: Option<bool>,
+}
+
+impl TvDetails {
+    /// Последняя вышедшая серия не означает, что сериал завершён.
+    fn ongoing(&self) -> Option<bool> {
+        match self.status.as_deref() {
+            Some("Ended" | "Canceled") => Some(false),
+            Some("Returning Series" | "In Production") => Some(true),
+            _ => self.in_production.filter(|ongoing| *ongoing),
+        }
+    }
+
+    pub fn apply_to(&self, found: &mut TmdbMatch) {
+        found.year = date_year(self.first_air_date.as_deref()).or(found.year);
+        found.ongoing = self.ongoing();
+        found.end_year = if found.ongoing == Some(false) {
+            date_year(self.last_air_date.as_deref())
+                .filter(|end| found.year.is_none_or(|start| *end >= start))
+        } else {
+            None
+        };
+    }
+}
+
+fn date_year(date: Option<&str>) -> Option<u32> {
+    date.and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .map(|date| date.year())
+        .filter(|year| *year > 0)
+        .map(|year| year as u32)
 }
 
 #[derive(Deserialize)]
@@ -72,6 +111,9 @@ impl SearchResult {
             tmdb_id: self.id,
             media_type,
             title: self.title.filter(|t| !t.trim().is_empty()),
+            year: date_year(self.release_date.as_deref()),
+            end_year: None,
+            ongoing: None,
             overview: self.overview.filter(|o| !o.is_empty()),
             rating: self.vote_average.filter(|v| *v > 0.0),
             poster_path: self.poster_path,
@@ -206,8 +248,8 @@ impl TmdbClient {
         Ok(best.map(|r| r.into_match(media_type.clone())))
     }
 
-    /// Список сезонов сериала. Отдельный запрос: поиск сезоны не возвращает.
-    pub async fn seasons(&self, tv_id: u64) -> Result<Vec<TmdbSeason>> {
+    /// Даты, статус и сезоны сериала: поиск этих подробностей не возвращает.
+    pub async fn tv_details(&self, tv_id: u64) -> Result<TvDetails> {
         let response = self
             .http
             .get(format!("{API_BASE}/tv/{tv_id}"))
@@ -217,18 +259,18 @@ impl TmdbClient {
             ])
             .send()
             .await
-            .context("Запрос сезонов к TMDB не удался")?;
+            .context("Запрос подробностей сериала к TMDB не удался")?;
 
         if !response.status().is_success() {
-            anyhow::bail!("TMDB ответил статусом {} на сезоны", response.status());
+            anyhow::bail!("TMDB ответил статусом {} на сериал", response.status());
         }
 
         let body: TvDetails = response
             .json()
             .await
-            .context("Не удалось разобрать сезоны TMDB")?;
+            .context("Не удалось разобрать подробности сериала TMDB")?;
 
-        Ok(body.seasons)
+        Ok(body)
     }
 
     /// Скачивает постер сезона в кэш. Возвращает имя файла для хранения в БД.
@@ -433,6 +475,109 @@ mod tests {
         serde_json::from_str::<SearchResponse>(json)
             .unwrap()
             .results
+    }
+
+    #[test]
+    fn search_extracts_movie_and_series_years_from_valid_dates() {
+        for (date_field, media_type) in [
+            ("release_date", MediaType::Movie),
+            ("first_air_date", MediaType::TvSeries),
+        ] {
+            for (date, expected) in [
+                (serde_json::json!("2001-05-18"), Some(2001)),
+                (serde_json::json!("2000-02-29"), Some(2000)),
+                (serde_json::Value::Null, None),
+                (serde_json::json!(""), None),
+                (serde_json::json!("unknown"), None),
+                (serde_json::json!("2001-02-29"), None),
+                (serde_json::json!("0000-01-01"), None),
+            ] {
+                let candidate: SearchResult = serde_json::from_value(serde_json::json!({
+                    "id": 808,
+                    (date_field): date,
+                }))
+                .unwrap();
+                assert_eq!(candidate.into_match(media_type.clone()).year, expected);
+            }
+        }
+
+        let candidate: SearchResult =
+            serde_json::from_value(serde_json::json!({"id": 808})).unwrap();
+        assert_eq!(candidate.into_match(MediaType::Movie).year, None);
+    }
+
+    #[test]
+    fn tv_year_ranges_require_a_known_status_and_valid_dates() {
+        for (status, production, last_date, expected_end, expected_ongoing) in [
+            (
+                Some("Ended"),
+                Some(false),
+                Some("2013-09-29"),
+                Some(2013),
+                Some(false),
+            ),
+            (
+                Some("Canceled"),
+                Some(true),
+                Some("2011-01-01"),
+                Some(2011),
+                Some(false),
+            ),
+            (
+                Some("Returning Series"),
+                Some(false),
+                Some("2026-01-01"),
+                None,
+                Some(true),
+            ),
+            (
+                Some("In Production"),
+                Some(true),
+                Some("2026-01-01"),
+                None,
+                Some(true),
+            ),
+            (
+                Some("Ended"),
+                Some(false),
+                Some("2008-12-31"),
+                Some(2008),
+                Some(false),
+            ),
+            (
+                Some("Ended"),
+                Some(false),
+                Some("2007-01-01"),
+                None,
+                Some(false),
+            ),
+            (
+                Some("Ended"),
+                Some(false),
+                Some("invalid"),
+                None,
+                Some(false),
+            ),
+            (Some("Ended"), Some(false), None, None, Some(false)),
+            (None, None, Some("2013-09-29"), None, None),
+            (Some("Unknown"), Some(false), Some("2013-09-29"), None, None),
+            (None, Some(true), Some("2013-09-29"), None, Some(true)),
+        ] {
+            let details: TvDetails = serde_json::from_value(serde_json::json!({
+                "first_air_date": "2008-01-20",
+                "last_air_date": last_date,
+                "status": status,
+                "in_production": production,
+            }))
+            .unwrap();
+            let candidate: SearchResult =
+                serde_json::from_value(serde_json::json!({"id": 1396})).unwrap();
+            let mut found = candidate.into_match(MediaType::TvSeries);
+            details.apply_to(&mut found);
+            assert_eq!(found.year, Some(2008));
+            assert_eq!(found.end_year, expected_end, "{status:?} {last_date:?}");
+            assert_eq!(found.ongoing, expected_ongoing, "{status:?}");
+        }
     }
 
     #[test]

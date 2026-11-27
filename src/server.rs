@@ -1043,7 +1043,23 @@ async fn enrich_tmdb(state: &AppState) -> u64 {
 
         for (id, title, year, media_type) in pending {
             match tmdb.search(&media_type, &title, year).await {
-                Ok(Some(found)) => {
+                Ok(Some(mut found)) => {
+                    let tv_details = if found.media_type == MediaType::TvSeries {
+                        match tmdb.tv_details(found.tmdb_id).await {
+                            Ok(details) => {
+                                details.apply_to(&mut found);
+                                Some(details)
+                            }
+                            Err(e) => {
+                                // Оставляем запись в очереди: без статуса нельзя отличить
+                                // продолжающийся сериал от завершённого.
+                                tracing::warn!("Подробности сериала TMDB для «{}»: {}", title, e);
+                                return enriched;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     // Имена файлов включают id картинки на TMDB, поэтому при смене
                     // найденного фильма старые остаются на диске — убираем их сами
                     let previous = [
@@ -1099,9 +1115,9 @@ async fn enrich_tmdb(state: &AppState) -> u64 {
                         // элемента в библиотеке для этого не показателен —
                         // мини-сериал одним файлом лежит среди фильмов
                         if media_type == MediaType::TvSeries
-                            && found.media_type == MediaType::TvSeries
+                            && let Some(details) = tv_details
                         {
-                            enrich_season_posters(state, &tmdb, &id, found.tmdb_id).await;
+                            enrich_season_posters(state, &tmdb, &id, &details.seasons).await;
                         }
                     }
                 }
@@ -1131,21 +1147,13 @@ async fn enrich_season_posters(
     state: &AppState,
     tmdb: &crate::tmdb::TmdbClient,
     series_id: &str,
-    tmdb_id: u64,
+    seasons: &[crate::tmdb::TmdbSeason],
 ) {
     let local = match state.db.get_season_numbers(series_id).await {
         Ok(seasons) if !seasons.is_empty() => seasons,
         Ok(_) => return,
         Err(e) => {
             tracing::warn!("Не удалось получить сезоны {}: {}", series_id, e);
-            return;
-        }
-    };
-
-    let seasons = match tmdb.seasons(tmdb_id).await {
-        Ok(seasons) => seasons,
-        Err(e) => {
-            tracing::warn!("Сезоны TMDB для {}: {}", series_id, e);
             return;
         }
     };
@@ -2818,6 +2826,14 @@ mod tests {
             .await
             .unwrap();
         sqlx::raw_sql(include_str!("../migrations/010_tmdb_titles.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/011_tmdb_year.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/012_series_year_range.sql"))
             .execute(&pool)
             .await
             .unwrap();

@@ -91,8 +91,14 @@ pub struct MediaItem {
     /// Пользовательское название, если оно задано вручную
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_title: Option<String>,
-    /// Год выпуска (опционально)
+    /// Год из имени файла, а при его отсутствии — из TMDB
     pub year: Option<u32>,
+    /// Год окончания сериала; для продолжающегося или неизвестного статуса — None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_year: Option<u32>,
+    /// None означает, что статус сериала ещё неизвестен
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ongoing: Option<bool>,
     /// Тип медиа
     #[serde(rename = "type")]
     pub media_type: MediaType,

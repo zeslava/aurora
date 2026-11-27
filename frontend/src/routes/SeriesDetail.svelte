@@ -8,6 +8,7 @@
   import ScreenMessage from '../components/ScreenMessage.svelte';
   import TitleEditor from '../components/TitleEditor.svelte';
   import { isWatchedToEnd } from '../lib/playback';
+  import { formatMediaYears } from '../lib/mediaYears';
   import type { MediaItem, SeriesEpisodesResponse, Episode, PlaybackState } from '../types';
 
   interface Props {
@@ -193,7 +194,7 @@
       <div class="series__head">
         <TitleEditor {media} onupdate={(updated) => (media = updated)} />
         {#if media.year}
-          <p class="hero__meta">{media.year}</p>
+          <p class="hero__meta">{formatMediaYears(media)}</p>
         {/if}
         {#if allWatched}
           <span class="badge badge--success">Просмотрено</span>

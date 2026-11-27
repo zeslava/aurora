@@ -440,7 +440,7 @@ impl Database {
     /// Получает медиа элементы с фильтрацией
     pub async fn get_media_items(&self, media_type: Option<&MediaType>) -> Result<Vec<MediaItem>> {
         let base = format!(
-            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.tmdb_title, mi.title), mi.year, mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title \
+            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.tmdb_title, mi.title), COALESCE(mi.year, mi.tmdb_year), mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title, mi.tmdb_end_year, mi.tmdb_ongoing \
              FROM media_items mi LEFT JOIN media_files mf ON mi.file_id = mf.id"
         );
 
@@ -790,7 +790,7 @@ impl Database {
     /// Получает медиа элемент по ID
     pub async fn get_media_item_by_id(&self, id: &str) -> Result<Option<MediaItem>> {
         let row = sqlx::query(&format!(
-            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.tmdb_title, mi.title), mi.year, mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title \
+            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.tmdb_title, mi.title), COALESCE(mi.year, mi.tmdb_year), mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title, mi.tmdb_end_year, mi.tmdb_ongoing \
              FROM media_items mi LEFT JOIN media_files mf ON mi.file_id = mf.id WHERE mi.id = ?"
         ))
         .bind(id)
@@ -803,6 +803,7 @@ impl Database {
 
     /// Элементы, для которых ещё не пробовали получить метаданные TMDB на этом языке.
     /// Поиск идёт по ручному названию или имени файла, а не по прошлому переводу.
+    /// Статус продолжающихся сериалов перепроверяется раз в неделю при запуске/скане.
     /// Возвращает (id, title, year, media_type).
     pub async fn get_items_pending_tmdb(
         &self,
@@ -812,6 +813,7 @@ impl Database {
         let rows = sqlx::query(
             "SELECT id, COALESCE(custom_title, title), year, media_type FROM media_items
              WHERE tmdb_synced_at IS NULL OR tmdb_language IS NOT ?
+                OR (tmdb_ongoing = 1 AND tmdb_synced_at < datetime('now', '-7 days'))
              ORDER BY created_at LIMIT ?",
         )
         .bind(language)
@@ -930,7 +932,8 @@ impl Database {
     ) -> Result<()> {
         sqlx::query(
             "UPDATE media_items
-             SET tmdb_id = ?, tmdb_title = ?, tmdb_language = ?, overview = ?, rating = ?,
+             SET tmdb_id = ?, tmdb_title = ?, tmdb_year = ?, tmdb_end_year = ?, tmdb_ongoing = ?,
+                 tmdb_language = ?, overview = ?, rating = ?,
                  poster_file = COALESCE(?, poster_file),
                  backdrop_file = COALESCE(?, backdrop_file),
                  tmdb_synced_at = CURRENT_TIMESTAMP
@@ -938,6 +941,9 @@ impl Database {
         )
         .bind(found.tmdb_id as i64)
         .bind(found.title.as_deref().filter(|t| !t.trim().is_empty()))
+        .bind(found.year.map(i64::from))
+        .bind(found.end_year.map(i64::from))
+        .bind(found.ongoing)
         .bind(language)
         .bind(found.overview.as_deref())
         .bind(found.rating)
@@ -954,7 +960,7 @@ impl Database {
     /// Отмечает попытку синхронизации без результата, чтобы не долбить API
     /// одним и тем же ненайденным названием на каждом скане
     pub async fn mark_tmdb_synced(&self, id: &str, language: &str) -> Result<()> {
-        sqlx::query("UPDATE media_items SET tmdb_synced_at = CURRENT_TIMESTAMP, tmdb_language = ?, tmdb_title = NULL WHERE id = ?")
+        sqlx::query("UPDATE media_items SET tmdb_synced_at = CURRENT_TIMESTAMP, tmdb_language = ?, tmdb_title = NULL, tmdb_year = NULL, tmdb_end_year = NULL, tmdb_ongoing = NULL WHERE id = ?")
             .bind(language)
             .bind(id)
             .execute(&self.pool)
@@ -1214,7 +1220,7 @@ fn row_to_file_info(row: &sqlx::sqlite::SqliteRow, offset: usize) -> MediaFileIn
 }
 
 /// Ожидает колонки: id, library_id, title, year, media_type, created_at,
-/// затем `FILE_COLUMNS` (10 колонок), `TMDB_COLUMNS` (5 колонок) и custom_title
+/// затем `FILE_COLUMNS` (10 колонок), `TMDB_COLUMNS` (5 колонок), custom_title и годы сериала
 fn row_to_media_item(row: sqlx::sqlite::SqliteRow) -> MediaItem {
     let media_type = match row.get::<String, _>(4).as_str() {
         "tv" => MediaType::TvSeries,
@@ -1229,6 +1235,8 @@ fn row_to_media_item(row: sqlx::sqlite::SqliteRow) -> MediaItem {
         title: row.get::<String, _>(2),
         custom_title: row.get::<Option<String>, _>(21),
         year: row.get::<Option<i64>, _>(3).map(|y| y as u32),
+        end_year: row.get::<Option<i64>, _>("tmdb_end_year").map(|y| y as u32),
+        ongoing: row.get("tmdb_ongoing"),
         media_type,
         created_at: parse_created_at(row.get::<Option<String>, _>(5)),
         file: row_to_file_info(&row, 6),
@@ -1283,6 +1291,14 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/011_tmdb_year.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/012_series_year_range.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         Database { pool }
     }
@@ -1309,11 +1325,267 @@ mod tests {
             tmdb_id: 808,
             media_type,
             title: title.map(str::to_string),
+            year: None,
+            end_year: None,
+            ongoing: None,
             overview: None,
             rating: None,
             poster_path: None,
             backdrop_path: None,
         }
+    }
+
+    #[tokio::test]
+    async fn tmdb_year_is_a_fallback_and_survives_rescanning() {
+        let db = test_db().await;
+        for media_type in [MediaType::Movie, MediaType::TvSeries] {
+            for source_year in [None, Some(2000)] {
+                let path = PathBuf::from(format!("/media/{media_type:?}-{source_year:?}.mkv"));
+                let file = insert_file(&db, path.to_str().unwrap()).await;
+                let item = db
+                    .insert_media_item(
+                        None,
+                        "Shrek",
+                        source_year,
+                        &media_type,
+                        (media_type == MediaType::Movie).then_some(file),
+                    )
+                    .await
+                    .unwrap();
+                let mut found = tmdb_match(media_type.clone(), Some("Шрек"));
+                found.year = Some(2001);
+                db.update_tmdb_metadata(&item, &found, "ru-RU", None, None)
+                    .await
+                    .unwrap();
+
+                let expected = source_year.or(Some(2001));
+                assert_eq!(
+                    db.get_media_item_by_id(&item).await.unwrap().unwrap().year,
+                    expected
+                );
+                let library = db.get_media_items(Some(&media_type)).await.unwrap();
+                assert_eq!(
+                    library.iter().find(|m| m.id == item).unwrap().year,
+                    expected
+                );
+
+                // Для следующего поиска используем только год из имени файла.
+                let pending = db.get_items_pending_tmdb(50, "en-US").await.unwrap();
+                assert_eq!(pending.iter().find(|p| p.0 == item).unwrap().2, source_year);
+
+                if media_type == MediaType::Movie {
+                    assert!(
+                        !db.refresh_movie_title(&path, "Shrek", source_year)
+                            .await
+                            .unwrap()
+                    );
+                    assert!(
+                        db.get_items_pending_tmdb(50, "ru-RU")
+                            .await
+                            .unwrap()
+                            .is_empty()
+                    );
+                    assert_eq!(
+                        db.get_media_item_by_id(&item).await.unwrap().unwrap().year,
+                        expected
+                    );
+
+                    // Новый год из имени файла немедленно получает приоритет.
+                    assert!(
+                        db.refresh_movie_title(&path, "Shrek", Some(2002))
+                            .await
+                            .unwrap()
+                    );
+                    assert_eq!(
+                        db.get_media_item_by_id(&item).await.unwrap().unwrap().year,
+                        Some(2002)
+                    );
+                    db.refresh_movie_title(&path, "Shrek", source_year)
+                        .await
+                        .unwrap();
+                }
+
+                // Если новый ответ не содержит даты, старый год TMDB не остаётся.
+                found.year = None;
+                db.update_tmdb_metadata(&item, &found, "ru-RU", None, None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    db.get_media_item_by_id(&item).await.unwrap().unwrap().year,
+                    source_year
+                );
+
+                found.year = Some(2001);
+                db.update_tmdb_metadata(&item, &found, "ru-RU", None, None)
+                    .await
+                    .unwrap();
+                db.mark_tmdb_synced(&item, "en-US").await.unwrap();
+                assert_eq!(
+                    db.get_media_item_by_id(&item).await.unwrap().unwrap().year,
+                    source_year
+                );
+                // Не оставляем записи из прошлых итераций в очереди ru-RU.
+                db.mark_tmdb_synced(&item, "ru-RU").await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tmdb_year_migration_requeues_only_matches_without_source_year() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for migration in sqlx::migrate!("./migrations")
+            .iter()
+            .filter(|m| m.version < 11)
+        {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        let db = Database { pool };
+        let mut items = Vec::new();
+        for (year, matched) in [(None, true), (Some(2000), true), (None, false)] {
+            let item = db
+                .insert_media_item(None, "Shrek", year, &MediaType::Movie, None)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE media_items SET tmdb_id = ?, tmdb_language = 'ru-RU', tmdb_synced_at = CURRENT_TIMESTAMP WHERE id = ?")
+                .bind(matched.then_some(808_i64))
+                .bind(&item)
+                .execute(&db.pool).await.unwrap();
+            items.push(item);
+        }
+        sqlx::raw_sql(include_str!("../migrations/011_tmdb_year.sql"))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let pending: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM media_items WHERE tmdb_synced_at IS NULL")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], items[0]);
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>("SELECT year FROM media_items WHERE id = ?")
+                .bind(&items[1])
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+            Some(2000_i64)
+        );
+    }
+
+    #[tokio::test]
+    async fn series_year_ranges_reach_library_and_details_and_refresh_after_a_week() {
+        let db = test_db().await;
+        let series = db
+            .insert_media_item(None, "Breaking Bad", None, &MediaType::TvSeries, None)
+            .await
+            .unwrap();
+        let mut found = tmdb_match(MediaType::TvSeries, Some("Во все тяжкие"));
+        found.year = Some(2008);
+        found.ongoing = Some(true);
+        db.update_tmdb_metadata(&series, &found, "ru-RU", None, None)
+            .await
+            .unwrap();
+        assert!(
+            db.get_items_pending_tmdb(50, "ru-RU")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        sqlx::query(
+            "UPDATE media_items SET tmdb_synced_at = datetime('now', '-8 days') WHERE id = ?",
+        )
+        .bind(&series)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let pending = db.get_items_pending_tmdb(50, "ru-RU").await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, series);
+
+        found.ongoing = Some(false);
+        found.end_year = Some(2013);
+        db.update_tmdb_metadata(&series, &found, "ru-RU", None, None)
+            .await
+            .unwrap();
+        let detail = db.get_media_item_by_id(&series).await.unwrap().unwrap();
+        assert_eq!(
+            (detail.year, detail.end_year, detail.ongoing),
+            (Some(2008), Some(2013), Some(false))
+        );
+        let library = db.get_media_items(None).await.unwrap();
+        assert_eq!(
+            (library[0].year, library[0].end_year, library[0].ongoing),
+            (Some(2008), Some(2013), Some(false))
+        );
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(json["end_year"], 2013);
+        assert_eq!(json["ongoing"], false);
+        sqlx::query(
+            "UPDATE media_items SET tmdb_synced_at = datetime('now', '-8 days') WHERE id = ?",
+        )
+        .bind(&series)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            db.get_items_pending_tmdb(50, "ru-RU")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // После нового поиска без результата старый диапазон не остаётся.
+        db.mark_tmdb_synced(&series, "en-US").await.unwrap();
+        let detail = db.get_media_item_by_id(&series).await.unwrap().unwrap();
+        assert_eq!(
+            (detail.year, detail.end_year, detail.ongoing),
+            (None, None, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn series_year_range_migration_requeues_existing_series() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for migration in sqlx::migrate!("./migrations")
+            .iter()
+            .filter(|m| m.version < 12)
+        {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        }
+        let db = Database { pool };
+        let mut series_id = String::new();
+        for (media_type, matched) in [
+            (MediaType::TvSeries, true),
+            (MediaType::Movie, true),
+            (MediaType::TvSeries, false),
+        ] {
+            let item = db
+                .insert_media_item(None, "Title", Some(2008), &media_type, None)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE media_items SET tmdb_id = ?, tmdb_language = 'ru-RU', tmdb_synced_at = CURRENT_TIMESTAMP WHERE id = ?")
+                .bind(matched.then_some(1396_i64)).bind(&item).execute(&db.pool).await.unwrap();
+            if matched && media_type == MediaType::TvSeries {
+                series_id = item;
+            }
+        }
+        sqlx::raw_sql(include_str!("../migrations/012_series_year_range.sql"))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let pending = db.get_items_pending_tmdb(50, "ru-RU").await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, series_id);
     }
 
     #[tokio::test]
