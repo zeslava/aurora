@@ -5,7 +5,7 @@ export function formatMediaYears(
 ): string | null {
   if (!media.year) return null;
   if (media.type === 'tvseries') {
-    if (media.ongoing === true) return `${media.year} — н. в.`;
+    if (media.ongoing === true) return `${media.year} — ...`;
     if (media.end_year && media.end_year > media.year) {
       return `${media.year}–${media.end_year}`;
     }
