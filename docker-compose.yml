@@ -15,7 +15,7 @@ services:
       - MEDIA_PATHS=/app/media/movies
       # Обложки с TMDB: ключ берётся из .env на хосте (пусто — обложки отключены)
       - TMDB_API_KEY=${TMDB_API_KEY:-}
-      - TMDB_LANGUAGE=ru-RU
+      - TMDB_LANGUAGE=${TMDB_LANGUAGE:-en-US}
       - CACHE_DIR=/app/data/cache
     volumes:
       # Та же БД, что и при локальном запуске (bind-mount каталога ./data)

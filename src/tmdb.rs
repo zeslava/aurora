@@ -20,6 +20,8 @@ pub struct TmdbMatch {
     /// Тип, по которому кандидат реально нашёлся: сканер определяет его по пути,
     /// и для мини-сериала в директории с фильмами он ошибается
     pub media_type: MediaType,
+    /// Локализованное название (`title` у фильма, `name` у сериала)
+    pub title: Option<String>,
     pub overview: Option<String>,
     pub rating: Option<f64>,
     /// Путь постера на TMDB (например, "/abc.jpg")
@@ -62,6 +64,20 @@ struct SearchResult {
     vote_average: Option<f64>,
     poster_path: Option<String>,
     backdrop_path: Option<String>,
+}
+
+impl SearchResult {
+    fn into_match(self, media_type: MediaType) -> TmdbMatch {
+        TmdbMatch {
+            tmdb_id: self.id,
+            media_type,
+            title: self.title.filter(|t| !t.trim().is_empty()),
+            overview: self.overview.filter(|o| !o.is_empty()),
+            rating: self.vote_average.filter(|v| *v > 0.0),
+            poster_path: self.poster_path,
+            backdrop_path: self.backdrop_path,
+        }
+    }
 }
 
 /// Клиент TMDB с кэшированием изображений на диск
@@ -187,14 +203,7 @@ impl TmdbClient {
         let best = pick_best(body.results, query, rank_year)
             .filter(|r| !require_title_match || matches_title(r, query));
 
-        Ok(best.map(|r| TmdbMatch {
-            tmdb_id: r.id,
-            media_type: media_type.clone(),
-            overview: r.overview.filter(|o| !o.is_empty()),
-            rating: r.vote_average.filter(|v| *v > 0.0),
-            poster_path: r.poster_path,
-            backdrop_path: r.backdrop_path,
-        }))
+        Ok(best.map(|r| r.into_match(media_type.clone())))
     }
 
     /// Список сезонов сериала. Отдельный запрос: поиск сезоны не возвращает.
@@ -416,6 +425,41 @@ mod tests {
         serde_json::from_str::<SearchResponse>(json)
             .unwrap()
             .results
+    }
+
+    #[test]
+    fn search_preserves_localized_movie_and_series_titles() {
+        for (json, media_type, query, expected) in [
+            (
+                r#"{"results":[{"id":808,"title":"Шрек","original_title":"Shrek"}]}"#,
+                MediaType::Movie,
+                "Shrek",
+                Some("Шрек"),
+            ),
+            (
+                r#"{"results":[{"id":1396,"name":"Во все тяжкие","original_name":"Breaking Bad"}]}"#,
+                MediaType::TvSeries,
+                "Breaking Bad",
+                Some("Во все тяжкие"),
+            ),
+            (
+                r#"{"results":[{"id":1,"title":"  ","original_title":"Untranslated"}]}"#,
+                MediaType::Movie,
+                "Untranslated",
+                None,
+            ),
+            (
+                r#"{"results":[{"id":1,"original_name":"Untranslated"}]}"#,
+                MediaType::TvSeries,
+                "Untranslated",
+                None,
+            ),
+        ] {
+            let found = pick_best(candidates(json), query, None)
+                .unwrap()
+                .into_match(media_type);
+            assert_eq!(found.title.as_deref(), expected);
+        }
     }
 
     /// Реальная выдача `search/tv?language=ru-RU&query=Восьмидесятые`:

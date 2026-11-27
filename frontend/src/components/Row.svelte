@@ -13,7 +13,6 @@
   let canPrevious = $state(false);
   let canNext = $state(false);
   let activeIndex = 0;
-  let movingWithArrow = false;
 
   const items = () => (element ? Array.from(element.children) as HTMLElement[] : []);
   const behavior = (): ScrollBehavior =>
@@ -31,7 +30,7 @@
   const updateEdges = () => {
     const geometry = measure();
     if (!element || !geometry) return;
-    // Округление CSS-пикселей на ТВ не должно оставлять стрелку на самом краю.
+    // Округление CSS-пикселей на ТВ не должно оставлять затенение на самом краю.
     canPrevious = element.scrollLeft > 1;
     canNext = element.scrollLeft < geometry.max - 1;
   };
@@ -52,7 +51,7 @@
     if (index < 0) return;
     activeIndex = index;
     // Наведение Magic Remote не должно уводить карточку из-под курсора.
-    if (movingWithArrow || document.documentElement.dataset.inputMode === 'pointer') return;
+    if (document.documentElement.dataset.inputMode === 'pointer') return;
     carousel.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: behavior() });
     reveal(items()[index]);
   };
@@ -63,31 +62,14 @@
     const direction = event.key === 'ArrowRight' || event.keyCode === 39 ? 1
       : event.key === 'ArrowLeft' || event.keyCode === 37 ? -1 : 0;
     if (direction) {
-      // Стрелки ленты не участвуют в геометрическом поиске соседей: только сами карточки.
+      // Внутри ленты двигаемся по порядку карточек, а не по их геометрии.
       event.preventDefault();
       event.stopPropagation();
       const next = Math.max(0, Math.min(activeIndex + direction, cards.length - 1));
       // На крайней карточке focusin не придёт повторно: после курсора раскрываем её явно.
       if (document.activeElement === cards[next]) reveal(cards[next]);
       cards[next].focus({ preventScroll: true });
-    } else if ((event.key === 'ArrowUp' || event.key === 'ArrowDown' ||
-      event.keyCode === 38 || event.keyCode === 40) &&
-      (event.target as HTMLElement).hasAttribute('data-carousel-control')) {
-      // После курсора возвращаем D-pad к карточкам, чтобы вверх/вниз меняли строку.
-      cards[Math.min(activeIndex, cards.length - 1)].focus({ preventScroll: true });
     }
-  };
-
-  const move = (direction: number) => {
-    const geometry = measure();
-    const cards = items();
-    if (!element || !geometry || !cards.length || !geometry.step) return;
-    const left = Math.max(0, Math.min(element.scrollLeft + direction * geometry.step, geometry.max));
-    const index = Math.min(cards.length - 1, Math.round(left / geometry.step));
-    movingWithArrow = true;
-    cards[index].focus({ preventScroll: true });
-    movingWithArrow = false;
-    element.scrollTo({ left, behavior: behavior() });
   };
 
   $effect(() => {
@@ -115,25 +97,6 @@
   <div class="row" data-carousel bind:this={element}>
     {@render children()}
   </div>
-  <!-- Курсорные стрелки дублируют D-pad и не добавляют остановок между карточками. -->
-  <button
-    class="carousel__arrow carousel__arrow--previous"
-    class:carousel__arrow--hidden={!canPrevious}
-    type="button"
-    tabindex="-1"
-    data-carousel-control
-    aria-label="Прокрутить назад"
-    onclick={() => move(-1)}
-  ><span aria-hidden="true">‹</span></button>
-  <button
-    class="carousel__arrow carousel__arrow--next"
-    class:carousel__arrow--hidden={!canNext}
-    type="button"
-    tabindex="-1"
-    data-carousel-control
-    aria-label="Прокрутить вперёд"
-    onclick={() => move(1)}
-  ><span aria-hidden="true">›</span></button>
 </div>
 
 <style>
@@ -185,42 +148,4 @@
     opacity: 1;
   }
 
-  .carousel__arrow {
-    position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: var(--z-overlay);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: var(--space-12);
-    height: var(--space-12);
-    padding: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-full);
-    background-color: var(--bg);
-    color: var(--text);
-    font-size: var(--text-3xl);
-    line-height: 1;
-    box-shadow: var(--shadow-lg);
-    cursor: pointer;
-    transition: background-color var(--transition);
-  }
-
-  .carousel__arrow:hover {
-    background-color: var(--surface-2);
-  }
-
-  .carousel__arrow--previous {
-    left: calc(var(--space-3) * -1);
-  }
-
-  .carousel__arrow--next {
-    right: calc(var(--space-3) * -1);
-  }
-
-  .carousel__arrow--hidden {
-    visibility: hidden;
-    pointer-events: none;
-  }
 </style>

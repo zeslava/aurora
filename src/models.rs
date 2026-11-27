@@ -86,7 +86,7 @@ pub struct MediaItem {
     pub id: String,
     /// ID библиотеки
     pub library_id: Option<u64>,
-    /// Название (пользовательское, если задано, иначе распарсенное из имени файла)
+    /// Название: ручное → локализованное из TMDB → распарсенное из имени файла
     pub title: String,
     /// Пользовательское название, если оно задано вручную
     #[serde(skip_serializing_if = "Option::is_none")]

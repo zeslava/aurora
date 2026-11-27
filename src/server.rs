@@ -1028,7 +1028,11 @@ async fn enrich_tmdb(state: &AppState) -> u64 {
     let mut enriched = 0u64;
 
     loop {
-        let pending = match state.db.get_items_pending_tmdb(50).await {
+        let pending = match state
+            .db
+            .get_items_pending_tmdb(50, &state.config.tmdb_language)
+            .await
+        {
             Ok(items) if items.is_empty() => break,
             Ok(items) => items,
             Err(e) => {
@@ -1073,9 +1077,8 @@ async fn enrich_tmdb(state: &AppState) -> u64 {
                         .db
                         .update_tmdb_metadata(
                             &id,
-                            found.tmdb_id,
-                            found.overview.as_deref(),
-                            found.rating,
+                            &found,
+                            &state.config.tmdb_language,
                             poster.as_deref(),
                             backdrop.as_deref(),
                         )
@@ -1104,7 +1107,10 @@ async fn enrich_tmdb(state: &AppState) -> u64 {
                 }
                 Ok(None) => {
                     tracing::debug!("TMDB: ничего не найдено для «{}»", title);
-                    let _ = state.db.mark_tmdb_synced(&id).await;
+                    let _ = state
+                        .db
+                        .mark_tmdb_synced(&id, &state.config.tmdb_language)
+                        .await;
                 }
                 Err(e) => {
                     // Сетевая ошибка — не помечаем как обработанное, попробуем в следующий раз
@@ -2808,6 +2814,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::raw_sql(include_str!("../migrations/009_audio_tracks.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/010_tmdb_titles.sql"))
             .execute(&pool)
             .await
             .unwrap();

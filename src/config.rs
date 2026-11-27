@@ -14,7 +14,7 @@ pub struct Config {
     pub database_url: String,
     /// Ключ TMDB API (v3). Без него загрузка обложек отключена
     pub tmdb_api_key: Option<String>,
-    /// Язык метаданных TMDB (например, "ru-RU")
+    /// Язык названий и описаний TMDB (например, "ru-RU")
     pub tmdb_language: String,
     /// Директория для кэша (обложки и прочее)
     pub cache_dir: PathBuf,
@@ -73,7 +73,11 @@ impl Config {
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty());
 
-        let tmdb_language = std::env::var("TMDB_LANGUAGE").unwrap_or_else(|_| "ru-RU".to_string());
+        let tmdb_language = std::env::var("TMDB_LANGUAGE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "en-US".to_string());
 
         let cache_dir =
             PathBuf::from(std::env::var("CACHE_DIR").unwrap_or_else(|_| "./cache".to_string()));

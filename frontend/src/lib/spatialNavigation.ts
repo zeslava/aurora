@@ -30,7 +30,7 @@ const isVisible = (el: HTMLElement): boolean => {
 
 const collectFocusable = (): HTMLElement[] =>
   Array.from(document.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-    .filter((el) => !el.hasAttribute('data-carousel-control') && isVisible(el));
+    .filter(isVisible);
 
 const focusAndReveal = (element: HTMLElement) => {
   // Карусель сама ведёт фокус с запасом справа; scrollIntoView сбил бы её позицию.

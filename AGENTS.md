@@ -34,7 +34,7 @@ TV apps are thin shells over `frontend/webos/index.html` (the SPA comes from the
 - `STRICT_AUTH` (default `false`) — `false`: LAN clients (private/loopback/link-local IP) need no token and act as the first user; everyone else needs a JWT. `true`: JWT always
 - `LOG_LEVEL`
 - `TMDB_API_KEY` — TMDB v3 key; without it cover art is disabled and the UI falls back to generated placeholders
-- `TMDB_LANGUAGE` (default `ru-RU`)
+- `TMDB_LANGUAGE` (default `en-US`) — language for titles and descriptions
 - `VAAPI_DEVICE` (default `/dev/dri/renderD128`; `off` disables) — iGPU used for video transcoding when a test encode passes at startup; otherwise libx264 on CPU. See `docs/decisions/0011-vaapi-video-encode.md`
 - `CACHE_DIR` (default `./cache`) — downloaded posters/backdrops live in `<CACHE_DIR>/images`
 
@@ -51,7 +51,7 @@ Backend is a flat module set under `src/`, wired in `main.rs` → shared `AppSta
 - `transcoder.rs` — `AudioTranscoder` spawns `ffmpeg` and streams fragmented MP4 (`-c:v copy`, audio → AAC stereo) as an async body stream; `HlsManager` generates HLS segments lazily.
 - `segments.rs` — `SegmentMap` is `Keyframes | Grid`; a `Grid` map is only valid when the video is re-encoded. The copy-profile cutter takes the `Keyframes` boundaries by type, so the combination that caused the desync bug does not compile.
 - `auth.rs` — JWT (jsonwebtoken, 365-day expiry, renewed on every client start) + bcrypt password hashing; token extracted from `Authorization` header.
-- `tmdb.rs` — TMDB client: title search (`search/movie`, `search/tv`) + downloading posters/backdrops into `<CACHE_DIR>/images`. Enrichment runs in the background after every scan and at startup for items with `tmdb_synced_at IS NULL`; images are served from `/api/media/:id/poster|backdrop` (public, like streams — `<img>` can't send an Authorization header).
+- `tmdb.rs` — TMDB client: title search (`search/movie`, `search/tv`) + downloading posters/backdrops into `<CACHE_DIR>/images`. Enrichment runs in the background after every scan and at startup for items with `tmdb_synced_at IS NULL` or a different `tmdb_language`; displayed titles prefer `custom_title`, then `tmdb_title`, then the scanned `title`. Images are served from `/api/media/:id/poster|backdrop` (public, like streams — `<img>` can't send an Authorization header).
 - `metrics.rs` — `MetricsCollector` (sysinfo) for process/system stats; logged every 60s and exposed at `/api/metrics`. Also `SEGMENT_DRIFT`: an invariant counter over "a served segment lasts exactly what the map promises" — `mismatched > 0` is a bug even with no user complaints.
 
 - `testkit.rs` (`#[cfg(test)]`) — the axes along which real files differ (`TimestampForm`, `GopForm`, `VideoForm`, `AudioForm`), `Shape::matrix()` of fixtures generated on the fly, and `assert_playable` — the one playability checklist used by every streaming test. **Never write a test against a hand-rolled fixture: add a `Shape` instead.** A fixture healthier than a real release is why three bugs shipped green.

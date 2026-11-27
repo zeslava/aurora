@@ -2,6 +2,7 @@ use crate::models::{
     AudioTrack, ContinueWatchingItem, Episode, Library, MediaFile, MediaFileInfo, MediaItem,
     MediaType, PlaybackState, TmdbInfo,
 };
+use crate::tmdb::TmdbMatch;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::{
@@ -439,7 +440,7 @@ impl Database {
     /// Получает медиа элементы с фильтрацией
     pub async fn get_media_items(&self, media_type: Option<&MediaType>) -> Result<Vec<MediaItem>> {
         let base = format!(
-            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.title), mi.year, mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title \
+            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.tmdb_title, mi.title), mi.year, mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title \
              FROM media_items mi LEFT JOIN media_files mf ON mi.file_id = mf.id"
         );
 
@@ -637,7 +638,7 @@ impl Database {
     ) -> Result<Vec<ContinueWatchingItem>> {
         // Фильмы
         let movie_rows = sqlx::query(
-            "SELECT mi.id, COALESCE(mi.custom_title, mi.title), ps.position, mf.duration, ps.last_watched, mi.poster_file, mi.backdrop_file
+            "SELECT mi.id, COALESCE(mi.custom_title, mi.tmdb_title, mi.title), ps.position, mf.duration, ps.last_watched, mi.poster_file, mi.backdrop_file
              FROM playback_state ps
              JOIN media_files mf ON mf.id = ps.file_id
              JOIN media_items mi ON mi.file_id = mf.id
@@ -675,7 +676,7 @@ impl Database {
                 FROM last l
                 WHERE l.rn = 1 AND (l.finished OR l.position > 0)
              )
-             SELECT e.id, COALESCE(s.custom_title, s.title),
+             SELECT e.id, COALESCE(s.custom_title, s.tmdb_title, s.title),
                     CASE WHEN nps.completed = 1 THEN 0 ELSE COALESCE(nps.position, 0) END,
                     mf.duration, t.last_watched,
                     e.series_id, e.season_number, e.episode_number, e.title AS episode_title,
@@ -789,7 +790,7 @@ impl Database {
     /// Получает медиа элемент по ID
     pub async fn get_media_item_by_id(&self, id: &str) -> Result<Option<MediaItem>> {
         let row = sqlx::query(&format!(
-            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.title), mi.year, mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title \
+            "SELECT mi.id, mi.library_id, COALESCE(mi.custom_title, mi.tmdb_title, mi.title), mi.year, mi.media_type, mi.created_at, {FILE_COLUMNS}, {TMDB_COLUMNS}, mi.custom_title \
              FROM media_items mi LEFT JOIN media_files mf ON mi.file_id = mf.id WHERE mi.id = ?"
         ))
         .bind(id)
@@ -800,17 +801,20 @@ impl Database {
         Ok(row.map(row_to_media_item))
     }
 
-    /// Элементы, для которых ещё не пробовали получить метаданные TMDB.
+    /// Элементы, для которых ещё не пробовали получить метаданные TMDB на этом языке.
+    /// Поиск идёт по ручному названию или имени файла, а не по прошлому переводу.
     /// Возвращает (id, title, year, media_type).
     pub async fn get_items_pending_tmdb(
         &self,
         limit: i64,
+        language: &str,
     ) -> Result<Vec<(String, String, Option<u32>, MediaType)>> {
         let rows = sqlx::query(
             "SELECT id, COALESCE(custom_title, title), year, media_type FROM media_items
-             WHERE tmdb_synced_at IS NULL
+             WHERE tmdb_synced_at IS NULL OR tmdb_language IS NOT ?
              ORDER BY created_at LIMIT ?",
         )
+        .bind(language)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -919,23 +923,24 @@ impl Database {
     pub async fn update_tmdb_metadata(
         &self,
         id: &str,
-        tmdb_id: u64,
-        overview: Option<&str>,
-        rating: Option<f64>,
+        found: &TmdbMatch,
+        language: &str,
         poster_file: Option<&str>,
         backdrop_file: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             "UPDATE media_items
-             SET tmdb_id = ?, overview = ?, rating = ?,
+             SET tmdb_id = ?, tmdb_title = ?, tmdb_language = ?, overview = ?, rating = ?,
                  poster_file = COALESCE(?, poster_file),
                  backdrop_file = COALESCE(?, backdrop_file),
                  tmdb_synced_at = CURRENT_TIMESTAMP
              WHERE id = ?",
         )
-        .bind(tmdb_id as i64)
-        .bind(overview)
-        .bind(rating)
+        .bind(found.tmdb_id as i64)
+        .bind(found.title.as_deref().filter(|t| !t.trim().is_empty()))
+        .bind(language)
+        .bind(found.overview.as_deref())
+        .bind(found.rating)
         .bind(poster_file)
         .bind(backdrop_file)
         .bind(id)
@@ -948,8 +953,9 @@ impl Database {
 
     /// Отмечает попытку синхронизации без результата, чтобы не долбить API
     /// одним и тем же ненайденным названием на каждом скане
-    pub async fn mark_tmdb_synced(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE media_items SET tmdb_synced_at = CURRENT_TIMESTAMP WHERE id = ?")
+    pub async fn mark_tmdb_synced(&self, id: &str, language: &str) -> Result<()> {
+        sqlx::query("UPDATE media_items SET tmdb_synced_at = CURRENT_TIMESTAMP, tmdb_language = ?, tmdb_title = NULL WHERE id = ?")
+            .bind(language)
             .bind(id)
             .execute(&self.pool)
             .await
@@ -1273,6 +1279,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/010_tmdb_titles.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         Database { pool }
     }
@@ -1292,6 +1302,168 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    fn tmdb_match(media_type: MediaType, title: Option<&str>) -> TmdbMatch {
+        TmdbMatch {
+            tmdb_id: 808,
+            media_type,
+            title: title.map(str::to_string),
+            overview: None,
+            rating: None,
+            poster_path: None,
+            backdrop_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn localized_titles_reach_library_details_and_continue_watching() {
+        let db = test_db().await;
+        let user = db.create_user("viewer", "hash").await.unwrap();
+        for media_type in [MediaType::Movie, MediaType::TvSeries] {
+            let file = insert_file(&db, &format!("/media/{media_type:?}.mkv")).await;
+            let item = db
+                .insert_media_item(
+                    None,
+                    "Shrek",
+                    Some(2001),
+                    &media_type,
+                    (media_type == MediaType::Movie).then_some(file),
+                )
+                .await
+                .unwrap();
+            if media_type == MediaType::TvSeries {
+                db.insert_episode(&item, 1, 1, None, file).await.unwrap();
+            }
+            db.upsert_playback_state(user, file, 20, false, None)
+                .await
+                .unwrap();
+
+            let found = tmdb_match(media_type.clone(), Some("Шрек"));
+            db.update_tmdb_metadata(&item, &found, "ru-RU", None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                db.get_media_item_by_id(&item).await.unwrap().unwrap().title,
+                "Шрек"
+            );
+            assert_eq!(
+                db.get_media_items(Some(&media_type)).await.unwrap()[0].title,
+                "Шрек"
+            );
+            let continuing = db.get_continue_watching(user, 10).await.unwrap();
+            assert!(
+                continuing
+                    .iter()
+                    .any(|c| c.title == "Шрек" && c.media_type == media_type)
+            );
+
+            // Сканер и поиск продолжают работать по исходному названию.
+            let source: String = sqlx::query_scalar("SELECT title FROM media_items WHERE id = ?")
+                .bind(&item)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(source, "Shrek");
+            let pending = db.get_items_pending_tmdb(50, "en-US").await.unwrap();
+            assert_eq!(pending.iter().find(|p| p.0 == item).unwrap().1, "Shrek");
+            if media_type == MediaType::TvSeries {
+                assert_eq!(
+                    db.find_series_by_title(None, "Shrek").await.unwrap(),
+                    Some(item.clone())
+                );
+            }
+
+            db.set_custom_title(&item, Some("Моё название"))
+                .await
+                .unwrap();
+            db.update_tmdb_metadata(&item, &found, "ru-RU", None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                db.get_media_item_by_id(&item).await.unwrap().unwrap().title,
+                "Моё название"
+            );
+            db.set_custom_title(&item, None).await.unwrap();
+            assert_eq!(
+                db.get_media_item_by_id(&item).await.unwrap().unwrap().title,
+                "Шрек"
+            );
+
+            // Пустой перевод не скрывает исходное название.
+            let untranslated = tmdb_match(media_type, Some("  "));
+            db.update_tmdb_metadata(&item, &untranslated, "en-US", None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                db.get_media_item_by_id(&item).await.unwrap().unwrap().title,
+                "Shrek"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tmdb_language_change_requeues_successful_and_unmatched_items() {
+        let db = test_db().await;
+        let movie = db
+            .insert_media_item(None, "Shrek", Some(2001), &MediaType::Movie, None)
+            .await
+            .unwrap();
+        // Старая БД: синхронизация была, но язык и перевод ещё не сохранялись.
+        sqlx::query("UPDATE media_items SET tmdb_synced_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(&movie)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_items_pending_tmdb(50, "ru-RU").await.unwrap().len(),
+            1
+        );
+
+        db.update_tmdb_metadata(
+            &movie,
+            &tmdb_match(MediaType::Movie, Some("Шрек")),
+            "ru-RU",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            db.get_items_pending_tmdb(50, "ru-RU")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.get_items_pending_tmdb(50, "en-US").await.unwrap().len(),
+            1
+        );
+
+        db.mark_tmdb_synced(&movie, "en-US").await.unwrap();
+        assert!(
+            db.get_items_pending_tmdb(50, "en-US")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.get_media_item_by_id(&movie)
+                .await
+                .unwrap()
+                .unwrap()
+                .title,
+            "Shrek"
+        );
+        assert_eq!(
+            db.get_items_pending_tmdb(50, "ru-RU").await.unwrap().len(),
+            1
+        );
+        db.reset_tmdb_sync().await.unwrap();
+        assert_eq!(
+            db.get_items_pending_tmdb(50, "en-US").await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
