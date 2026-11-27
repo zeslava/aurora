@@ -400,6 +400,10 @@ mod tests {
         assert_eq!(normalize_query("The Matrix [1080p] GROUP"), "The Matrix");
         assert_eq!(normalize_query("Интерстеллар [2014]"), "Интерстеллар");
         assert_eq!(normalize_query("breaking bad"), "breaking bad");
+        assert_eq!(
+            normalize_query("Chronicles of Narnia Prince Caspian 2008 Open Matte"),
+            "Chronicles of Narnia Prince Caspian"
+        );
     }
 
     #[test]

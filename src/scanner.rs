@@ -387,11 +387,11 @@ fn trim_brackets(raw: &str) -> String {
     raw[..cut].trim().trim_end_matches('-').trim().to_string()
 }
 
-/// Однозначные технические метки: качество, кодеки и источник.
+/// Однозначные технические метки: качество, кодеки, источник и формат кадра.
 fn noise_pattern() -> &'static Regex {
     static NOISE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
-            r"(?i)\b(2160[pi]|1080[pi]|720[pi]|576[pi]|480[pi]|4k|uhd|blu[ -]?ray|bd[ -]?remux|b[dr]rip|dvdrip|dvdscr|dvd|dcprip|web[ -]?dl[ -]?rip|web[ -]?dl|web[ -]?rip|hdrip|hdtv|camrip|tvrip|satrip|iptvrip|remux|x[ -]?26[45]|hevc|avc|h[ -]?26[45]|xvid|divx|e[ -]?ac[ -]?3|ac[ -]?3|ddp(?:[ -]?\d)?|dd\+(?:\d)?|dts|truehd|aac|mp3|10[ -]?bit|hdr(?:10)?|dolby[ -]?vision)\b",
+            r"(?i)\b(2160[pi]|1080[pi]|720[pi]|576[pi]|480[pi]|4k|uhd|blu[ -]?ray|bd[ -]?remux|b[dr]rip|dvdrip|dvdscr|dvd|dcprip|web[ -]?dl[ -]?rip|web[ -]?dl|web[ -]?rip|hdrip|hdtv|camrip|tvrip|satrip|iptvrip|remux|x[ -]?26[45]|hevc|avc|h[ -]?26[45]|xvid|divx|e[ -]?ac[ -]?3|ac[ -]?3|ddp(?:[ -]?\d)?|dd\+(?:\d)?|dts|truehd|aac|mp3|10[ -]?bit|hdr(?:10)?|dolby[ -]?vision|open[ -]?matte)\b",
         ).unwrap()
     });
     &NOISE
@@ -691,6 +691,11 @@ mod tests {
                 Some(1969),
             ),
             ("2012 (2009) 1080p", "2012", Some(2009)),
+            (
+                "Chronicles of Narnia Prince Caspian 2008 Open Matte",
+                "Chronicles of Narnia Prince Caspian",
+                Some(2008),
+            ),
         ] {
             assert_eq!(
                 parse_movie_filename(input),
@@ -852,6 +857,13 @@ mod tests {
             "H.264",
             "H-265",
             "E-AC-3",
+            "Open Matte",
+            "open matte",
+            "OPEN.MATTE",
+            "Open_Matte",
+            "Open-Matte",
+            "OpenMatte",
+            "[Open Matte]",
         ] {
             let input = format!("Movie {tag} GROUP");
             assert_eq!(
