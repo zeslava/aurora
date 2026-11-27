@@ -62,9 +62,6 @@
     return `${hours}ч ${minutes}м`;
   };
 
-  // Кодек в верхнем регистре — так читабельнее
-  const formatCodec = (codec?: string) => (codec ? codec.toUpperCase() : '');
-
   // Стартовый фокус — на главной кнопке, чтобы с пульта сразу нажать «Смотреть»
   let watchButton = $state<HTMLButtonElement | null>(null);
   $effect(() => {
@@ -134,24 +131,6 @@
             <div class="specs__row">
               <dt>Разрешение:</dt>
               <dd>{media.resolution}</dd>
-            </div>
-          {/if}
-          {#if media.video_codec}
-            <div class="specs__row">
-              <dt>Видео кодек:</dt>
-              <dd>{formatCodec(media.video_codec)}</dd>
-            </div>
-          {/if}
-          {#if media.audio_codec}
-            <div class="specs__row">
-              <dt>Аудио кодек:</dt>
-              <dd>{formatCodec(media.audio_codec)}</dd>
-            </div>
-          {/if}
-          {#if media.video_bitrate}
-            <div class="specs__row">
-              <dt>Битрэйт:</dt>
-              <dd>{Math.round(media.video_bitrate / 1000000)} Мбит/с</dd>
             </div>
           {/if}
         </dl>

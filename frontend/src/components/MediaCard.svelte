@@ -27,7 +27,6 @@
   title={media.title}
   poster={media.backdrop}
   subtitle={media.year ? String(media.year) : null}
-  badge={media.resolution}
   icon={media.type === 'tvseries' ? '📺' : '🎬'}
   actionLabel={progressPercent > 5 ? 'Продолжить' : 'Смотреть'}
   {progressPercent}

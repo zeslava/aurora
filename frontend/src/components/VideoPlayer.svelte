@@ -1027,7 +1027,7 @@
             <button
               onclick={toggleAudioMenu}
               bind:this={audioMenuToggleEl}
-              class="btn audio-menu__toggle"
+              class="btn btn--icon audio-menu__toggle"
               title="Аудиодорожка"
               aria-expanded={audioMenuOpen}
             >
@@ -1192,6 +1192,7 @@
   /* Кнопка подписана словом: одна иконка динамика читается как громкость, а на
      телевизоре до неё ещё надо доехать пультом — цель должна быть крупной. */
   .audio-menu__toggle {
+    padding: var(--space-2) var(--space-4);
     font-size: var(--text-lg);
   }
 

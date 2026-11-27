@@ -7,7 +7,6 @@
     /** Относительный путь обложки с бэкенда; null — рисуем плейсхолдер */
     poster?: string | null;
     subtitle?: string | null;
-    badge?: string | null;
     icon?: string;
     actionLabel?: string;
     progressPercent?: number;
@@ -23,7 +22,6 @@
     title,
     poster = null,
     subtitle = null,
-    badge = null,
     icon = '🎬',
     actionLabel = 'Смотреть',
     progressPercent = 0,
@@ -48,9 +46,6 @@
   class:tile--row={variant === 'row'}
 >
   <div class="tile__poster poster" class:tile__poster--portrait={aspect === 'poster'}>
-    {#if badge}
-      <div class="tile__badge">{badge}</div>
-    {/if}
     <Poster {poster} {title} {icon} />
     {#if progressPercent > 0}
       <div class="progress progress--overlay">
@@ -65,13 +60,17 @@
   <div class="tile__body">
     <h3 class="tile__title">{title}</h3>
     {#if subtitle}<p class="tile__subtitle">{subtitle}</p>{/if}
-    {@render footer?.()}
+    {#if footer}
+      <div class="tile__footer">{@render footer()}</div>
+    {/if}
   </div>
 </div>
 
 <style>
   .tile {
     position: relative;
+    display: flex;
+    flex-direction: column;
     background-color: var(--surface);
     border-radius: var(--radius);
     overflow: hidden;
@@ -92,24 +91,13 @@
   }
 
   .tile__poster {
+    flex-shrink: 0;
     aspect-ratio: 16 / 9;
     border-radius: 0;
   }
 
   .tile__poster--portrait {
     aspect-ratio: 2 / 3;
-  }
-
-  .tile__badge {
-    position: absolute;
-    top: var(--space-2);
-    right: var(--space-2);
-    z-index: var(--z-raised);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    background-color: var(--scrim-strong);
-    font-size: var(--text-xs);
-    font-weight: var(--weight-semibold);
   }
 
   .tile__hover {
@@ -143,7 +131,15 @@
   }
 
   .tile__body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
     padding: var(--space-3);
+  }
+
+  .tile__footer {
+    display: flex;
+    margin-top: auto;
   }
 
   .tile__title,
@@ -159,6 +155,7 @@
   }
 
   .tile__subtitle {
+    margin-top: var(--space-2);
     color: var(--text-muted);
     font-size: var(--text-xs);
   }

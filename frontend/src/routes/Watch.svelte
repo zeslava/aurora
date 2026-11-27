@@ -169,10 +169,6 @@
           {/snippet}
         </VideoPlayer>
       {/key}
-      <!-- Диагностическая информация (только если кодек не определен) -->
-      {#if !playable.audio_codec}
-        <div class="watch__warning">⚠️ Аудио кодек не определен - возможно, видео без звука</div>
-      {/if}
     </div>
 
   </div>
@@ -187,17 +183,6 @@
   .watch__player {
     width: 100%;
     height: 100vh;
-  }
-
-  .watch__warning {
-    position: absolute;
-    left: var(--space-4);
-    bottom: var(--space-20);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    background-color: var(--scrim);
-    color: var(--warning);
-    font-size: var(--text-sm);
   }
 
   .watch__back {
