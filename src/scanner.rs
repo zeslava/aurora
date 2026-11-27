@@ -403,8 +403,8 @@ fn bracket_pattern() -> &'static Regex {
     &BRACKETS
 }
 
-/// В обычном тексте спорные слова остаются частью названия. В хвосте релиза
-/// учитываем только прописные метки, а внутри скобок регистр не важен.
+/// Перед годом или технической меткой спорные слова удаляем только прописными,
+/// чтобы сохранить названия вроде «The Sub» и «The Dub».
 fn weak_suffix_pattern() -> &'static Regex {
     static WEAK_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"\b(?:PROPER|REPACK|MULTI|RUS|ENG|SUB|SUBBED|DUB|DUBBED)(?:[\s\[\](){}-]+(?:PROPER|REPACK|MULTI|RUS|ENG|SUB|SUBBED|DUB|DUBBED))*[\s\[\](){}-]*$").unwrap()
@@ -420,14 +420,19 @@ fn include_weak_suffix(title: &str, cut: usize) -> usize {
         .unwrap_or(cut)
 }
 
-fn release_cut(title: &str) -> Option<usize> {
-    static BRACKET_TAGS: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)^\s*(?:proper|repack|multi|rus|eng|sub|subbed|dub|dubbed)(?:[\s-]+(?:proper|repack|multi|rus|eng|sub|subbed|dub|dubbed))*\s*$").unwrap()
+/// После года и внутри скобок метки релиза распознаём независимо от регистра.
+fn release_tags_pattern() -> &'static Regex {
+    static RELEASE_TAGS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^[\s\[\](){}-]*(?:proper|repack|multi|rus|eng|sub|subbed|dub|dubbed)(?:[\s\[\](){}-]+(?:proper|repack|multi|rus|eng|sub|subbed|dub|dubbed))*[\s\[\](){}-]*$").unwrap()
     });
+    &RELEASE_TAGS
+}
+
+fn release_cut(title: &str) -> Option<usize> {
     let strong = noise_pattern().find(title).map(|m| m.start());
     let bracket = bracket_pattern()
         .find_iter(title)
-        .find(|m| BRACKET_TAGS.is_match(&m.as_str()[1..m.len() - 1]))
+        .find(|m| release_tags_pattern().is_match(&m.as_str()[1..m.len() - 1]))
         .map(|m| m.start());
     let cut = strong.into_iter().chain(bracket).min()?;
     Some(include_weak_suffix(title, cut))
@@ -487,9 +492,7 @@ fn release_year(
                 return None;
             }
             let suffix = prefix[m.end()..].trim();
-            let tags = weak_suffix_pattern()
-                .find(suffix)
-                .is_some_and(|m| m.start() == 0);
+            let tags = release_tags_pattern().is_match(suffix);
             let part = PART_SUFFIX.is_match(suffix);
             let context = release_style || technical_cut.is_some() || tags || part;
             (context && (suffix.is_empty() || tags || part)).then_some((m.start(), year))
@@ -696,6 +699,11 @@ mod tests {
                 "Chronicles of Narnia Prince Caspian",
                 Some(2008),
             ),
+            (
+                "De l'autre cote du periph 2012 Dub",
+                "De l'autre cote du periph",
+                Some(2012),
+            ),
         ] {
             assert_eq!(
                 parse_movie_filename(input),
@@ -788,6 +796,37 @@ mod tests {
     }
 
     #[test]
+    fn release_tags_after_year_are_case_insensitive() {
+        for tags in [
+            "Dub",
+            "dub",
+            "dUb",
+            "DUB",
+            "Dubbed",
+            "Proper",
+            "Repack",
+            "Multi",
+            "Rus",
+            "Eng",
+            "Sub",
+            "Subbed",
+            "Dub Rus Eng",
+            "Dub (Eng)",
+        ] {
+            for separator in [" ", ".", "_"] {
+                let input =
+                    format!("De l'autre cote du periph 2012 {tags}").replace(' ', separator);
+                assert_eq!(
+                    parse_movie_filename(&input),
+                    ("De l'autre cote du periph".into(), Some(2012)),
+                    "{input}"
+                );
+                assert_eq!(series_title(&input, "S01E01"), "De l'autre cote du periph");
+            }
+        }
+    }
+
+    #[test]
     fn ambiguous_tags_need_release_context() {
         for title in [
             "A Proper Man",
@@ -795,6 +834,9 @@ mod tests {
             "The Sub",
             "Multi",
             "Dub",
+            "The Dub",
+            "The Proper",
+            "Movie 2012 Dub Story",
             "The Repack Story",
         ] {
             assert_eq!(parse_movie_filename(title), (title.into(), None));

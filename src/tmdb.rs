@@ -404,6 +404,10 @@ mod tests {
             normalize_query("Chronicles of Narnia Prince Caspian 2008 Open Matte"),
             "Chronicles of Narnia Prince Caspian"
         );
+        assert_eq!(
+            normalize_query("De l'autre cote du periph 2012 Dub"),
+            "De l'autre cote du periph"
+        );
     }
 
     #[test]
