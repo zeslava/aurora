@@ -151,6 +151,12 @@
       : []
   );
   let currentEpisodes = $derived(episodes?.seasons[selectedSeason.toString()] || []);
+  let allWatched = $derived.by(() => {
+    const allEpisodes = Object.values(episodes?.seasons ?? {}).flat();
+    return allEpisodes.length > 0 && allEpisodes.every(
+      (episode) => isWatchedToEnd(progressMap[episode.id], episode.duration)
+    );
+  });
   // Постер сезона есть не всегда — фоном тогда останется обложка сериала
   let seasonPoster = $derived(episodes?.season_posters[selectedSeason.toString()] ?? null);
 
@@ -188,6 +194,9 @@
         <TitleEditor {media} onupdate={(updated) => (media = updated)} />
         {#if media.year}
           <p class="hero__meta">{media.year}</p>
+        {/if}
+        {#if allWatched}
+          <span class="badge badge--success">Просмотрено</span>
         {/if}
       </div>
 

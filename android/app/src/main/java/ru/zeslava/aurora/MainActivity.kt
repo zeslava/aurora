@@ -1,4 +1,4 @@
-package com.aurora.mediaserver
+package ru.zeslava.aurora
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -6,10 +6,12 @@ import android.app.UiModeManager
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -95,7 +97,26 @@ class MainActivity : Activity() {
 
         root = FrameLayout(this)
         root.addView(webView, matchParent())
+        // С targetSdk 36 на Android 16 нельзя отключить edge-to-edge.
+        // Отступы применяем только к WebView: fullscreen-видео занимает весь root.
+        if (Build.VERSION.SDK_INT >= 35) {
+            window.setDecorFitsSystemWindows(false)
+            root.setOnApplyWindowInsetsListener { _, insets ->
+                val safe = insets.getInsets(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or
+                        WindowInsets.Type.ime()
+                )
+                val params = webView.layoutParams as FrameLayout.LayoutParams
+                if (params.leftMargin != safe.left || params.topMargin != safe.top ||
+                    params.rightMargin != safe.right || params.bottomMargin != safe.bottom) {
+                    params.setMargins(safe.left, safe.top, safe.right, safe.bottom)
+                    webView.layoutParams = params
+                }
+                insets
+            }
+        }
         setContentView(root)
+        root.requestApplyInsets()
         if (isTv) hideSystemBars()
 
         if (savedInstanceState == null) {

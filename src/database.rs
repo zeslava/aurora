@@ -237,15 +237,14 @@ impl Database {
     ) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE media_items
-             SET title = ?, year = COALESCE(?, year), tmdb_synced_at = NULL
+             SET title = ?, year = ?, tmdb_synced_at = NULL
              WHERE file_id = (SELECT id FROM media_files WHERE file_path = ?)
-               AND (title <> ? OR (? IS NOT NULL AND year IS NOT ?))",
+               AND (title <> ? OR year IS NOT ?)",
         )
         .bind(title)
         .bind(year.map(|y| y as i64))
         .bind(file_path.to_string_lossy().as_ref())
         .bind(title)
-        .bind(year.map(|y| y as i64))
         .bind(year.map(|y| y as i64))
         .execute(&self.pool)
         .await
@@ -547,6 +546,46 @@ impl Database {
         .context("Не удалось обновить состояние просмотра")?;
 
         Ok(())
+    }
+
+    /// Сериал просмотрен, только если досмотрены все его эпизоды во всех сезонах.
+    /// Позиции у контейнера нет; хвост в 60 секунд считаем как на экране эпизодов.
+    pub async fn get_series_playback_state(
+        &self,
+        user_id: u64,
+        series_id: &str,
+    ) -> Result<Option<PlaybackState>> {
+        let row = sqlx::query(
+            "SELECT COUNT(ps.file_id),
+                    MIN(CASE WHEN ps.completed = 1 OR
+                             (mf.duration > 0 AND ps.position >= mf.duration - 60)
+                        THEN 1 ELSE 0 END),
+                    MAX(ps.last_watched)
+             FROM episodes e
+             JOIN media_files mf ON mf.id = e.file_id
+             LEFT JOIN playback_state ps ON ps.file_id = e.file_id AND ps.user_id = ?
+             WHERE e.series_id = ?",
+        )
+        .bind(user_id as i64)
+        .bind(series_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Не удалось получить состояние просмотра сериала")?;
+
+        if row.get::<i64, _>(0) == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(PlaybackState {
+            user_id,
+            media_id: series_id.to_string(),
+            position: 0,
+            completed: row.get::<Option<bool>, _>(1).unwrap_or(false),
+            last_watched: row
+                .get::<Option<String>, _>(2)
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc)),
+        }))
     }
 
     /// Получает состояние просмотра по файлу.
@@ -1253,6 +1292,183 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rescanning_clears_misparsed_year_and_preserves_custom_title() {
+        let db = test_db().await;
+        let path = PathBuf::from("/media/Blade Runner 2049.mkv");
+        let file = insert_file(&db, path.to_str().unwrap()).await;
+        let movie = db
+            .insert_media_item(
+                None,
+                "Blade Runner",
+                Some(2049),
+                &MediaType::Movie,
+                Some(file),
+            )
+            .await
+            .unwrap();
+        db.set_custom_title(&movie, Some("Бегущий по лезвию 2049"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE media_items SET tmdb_synced_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(&movie)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        assert!(
+            db.refresh_movie_title(&path, "Blade Runner 2049", None)
+                .await
+                .unwrap()
+        );
+        let row = sqlx::query(
+            "SELECT title, year, custom_title, tmdb_synced_at FROM media_items WHERE id = ?",
+        )
+        .bind(&movie)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<String, _>("title"), "Blade Runner 2049");
+        assert_eq!(row.get::<Option<i64>, _>("year"), None);
+        assert_eq!(
+            row.get::<String, _>("custom_title"),
+            "Бегущий по лезвию 2049"
+        );
+        assert_eq!(row.get::<Option<String>, _>("tmdb_synced_at"), None);
+        assert!(
+            !db.refresh_movie_title(&path, "Blade Runner 2049", None)
+                .await
+                .unwrap()
+        );
+
+        // Исправление одного года без смены названия тоже применяется ровно один раз.
+        assert!(
+            db.refresh_movie_title(&path, "Blade Runner 2049", Some(2017))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.refresh_movie_title(&path, "Blade Runner 2049", Some(2017))
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.refresh_movie_title(&path, "Blade Runner 2049", None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.refresh_movie_title(&path, "Blade Runner 2049", None)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn series_playback_requires_every_episode_for_current_user() {
+        let db = test_db().await;
+        let user = db.create_user("viewer", "hash").await.unwrap();
+        let other = db.create_user("other", "hash").await.unwrap();
+        let series = db
+            .insert_media_item(None, "Сериал", None, &MediaType::TvSeries, None)
+            .await
+            .unwrap();
+        assert!(
+            db.get_series_playback_state(user, &series)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let first = insert_file(&db, "/media/s1e1.mp4").await;
+        let second = insert_file(&db, "/media/s2e1.mp4").await;
+        db.insert_episode(&series, 1, 1, None, first).await.unwrap();
+        db.insert_episode(&series, 2, 1, None, second)
+            .await
+            .unwrap();
+        assert!(
+            db.get_series_playback_state(user, &series)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        db.upsert_playback_state(user, first, 0, true, None)
+            .await
+            .unwrap();
+        db.upsert_playback_state(other, second, 100, true, None)
+            .await
+            .unwrap();
+        assert!(
+            !db.get_series_playback_state(user, &series)
+                .await
+                .unwrap()
+                .unwrap()
+                .completed
+        );
+
+        // До хвоста остаётся секунда: сериал ещё не просмотрен.
+        db.upsert_playback_state(user, second, 39, false, None)
+            .await
+            .unwrap();
+        assert!(
+            !db.get_series_playback_state(user, &series)
+                .await
+                .unwrap()
+                .unwrap()
+                .completed
+        );
+        let now = Utc::now();
+        db.upsert_playback_state(user, second, 40, false, Some(now))
+            .await
+            .unwrap();
+        let progress = db
+            .get_series_playback_state(user, &series)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(progress.completed);
+        assert_eq!(progress.media_id, series);
+        assert_eq!(progress.user_id, user);
+        assert_eq!(progress.last_watched, Some(now));
+
+        // Новая серия снимает плашку; неизвестная длительность требует completed.
+        let third = insert_file(&db, "/media/s2e2.mp4").await;
+        db.insert_episode(&series, 2, 2, None, third).await.unwrap();
+        assert!(
+            !db.get_series_playback_state(user, &series)
+                .await
+                .unwrap()
+                .unwrap()
+                .completed
+        );
+        sqlx::query("UPDATE media_files SET duration = NULL WHERE id = ?")
+            .bind(third as i64)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        db.upsert_playback_state(user, third, 100, false, None)
+            .await
+            .unwrap();
+        assert!(
+            !db.get_series_playback_state(user, &series)
+                .await
+                .unwrap()
+                .unwrap()
+                .completed
+        );
+        db.upsert_playback_state(user, third, 100, true, None)
+            .await
+            .unwrap();
+        assert!(
+            db.get_series_playback_state(user, &series)
+                .await
+                .unwrap()
+                .unwrap()
+                .completed
+        );
     }
 
     /// Регрессия: id фильма и эпизода не должны совпадать, иначе стриминг

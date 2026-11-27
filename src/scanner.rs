@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
+use chrono::Datelike;
+use regex::Regex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use walkdir::WalkDir;
 
 /// Поддерживаемые расширения видеофайлов
@@ -140,14 +143,10 @@ fn split_multipart_movies(movies: Vec<ScannedMovie>) -> (Vec<ScannedMovie>, Vec<
 /// Перед «part» требуем разделитель явно: `\b` не сработает после `_`,
 /// а «_part» — самая частая форма в релизных именах.
 fn part_number(file_path: &Path) -> Option<u32> {
+    static PART: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)[._\-\s]part[._\-\s]*(\d{1,2})\b").unwrap());
     let stem = file_path.file_stem()?.to_str()?;
-    regex::Regex::new(r"(?i)[._\-\s]part[._\-\s]*(\d{1,2})\b")
-        .unwrap()
-        .captures(stem)?
-        .get(1)?
-        .as_str()
-        .parse()
-        .ok()
+    PART.captures(stem)?.get(1)?.as_str().parse().ok()
 }
 
 /// Схлопывает сериалы, чьё название целиком является началом другого:
@@ -244,8 +243,11 @@ fn classify(file_path: &Path, base_path: &Path) -> Result<Classified> {
 
 /// Регекс паттерна эпизода в имени файла (S01E02, S1E2, s03.e20, 1x02 и т.д.).
 /// Между «s», номером и «e» допустимы разделители релизных имён (точка, дефис, подчёркивание).
-fn episode_pattern() -> regex::Regex {
-    regex::Regex::new(r"(?i)\bs[._\-\s]*(\d{1,3})[._\-\s]*e[._\-\s]*(\d{1,3})\b|\b(\d{1,2})[._\-\s]*x[._\-\s]*(\d{1,3})\b").unwrap()
+fn episode_pattern() -> &'static Regex {
+    static EPISODE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\bs[._\-\s]*(\d{1,3})[._\-\s]*e[._\-\s]*(\d{1,3})\b|\b(\d{1,2})[._\-\s]*x[._\-\s]*(\d{1,3})\b").unwrap()
+    });
+    &EPISODE
 }
 
 /// Извлекает номера сезона и эпизода из имени файла (с запасными вариантами по пути)
@@ -266,19 +268,20 @@ fn parse_episode_numbers(file_name: &str, components: &[String]) -> (u32, u32) {
     }
 
     // Сезон из директории вида "Season 01" / "Сезон 1"
-    let season_dir = regex::Regex::new(r"(?i)(?:season|сезон)\s*(\d+)").unwrap();
+    static SEASON_DIR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)(?:season|сезон)\s*(\d+)").unwrap());
+    static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)").unwrap());
     let season = components
         .iter()
         .find_map(|c| {
-            season_dir
+            SEASON_DIR
                 .captures(c)
                 .and_then(|c| c[1].parse::<u32>().ok())
         })
         .unwrap_or(1);
 
     // Номер эпизода — первое число в имени файла
-    let episode = regex::Regex::new(r"(\d+)")
-        .unwrap()
+    let episode = NUMBER
         .captures(file_name)
         .and_then(|c| c[1].parse::<u32>().ok())
         .unwrap_or(1);
@@ -341,55 +344,156 @@ fn title_key(title: &str) -> String {
 /// подчёркивание или пробел — дефис к разделителям не относится и остаётся частью
 /// слова («80-e.s03.e20» → «80-e»). Дефис, окружённый пробелами, — всегда разделитель.
 fn normalize_separators(raw: &str) -> String {
-    let spaced_dash = regex::Regex::new(r"\s+-\s+").unwrap().replace_all(raw, " ");
+    static SPACED_DASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+-\s+").unwrap());
+    static SEPARATORS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[._\s]+").unwrap());
+    static WITH_DASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[._\-\s]+").unwrap());
+    let spaced_dash = SPACED_DASH.replace_all(raw, " ");
 
-    let class = if spaced_dash.contains(['.', '_', ' ']) {
-        r"[._\s]+"
+    let separators = if spaced_dash.contains(['.', '_', ' ']) {
+        &SEPARATORS
     } else {
-        r"[._\-\s]+"
+        &WITH_DASH
     };
 
-    regex::Regex::new(class)
-        .unwrap()
+    separators
         .replace_all(&spaced_dash, " ")
         .trim()
         .trim_matches('-')
         .to_string()
 }
 
-/// Приводит разделители к пробелам и отрезает технические метки релиза
-fn clean_title(raw: &str) -> String {
-    let normalized = normalize_separators(raw);
-
-    let cut = noise_pattern()
-        .find(&normalized)
-        .map(|m| m.start())
-        .unwrap_or(normalized.len());
-
-    let title = trim_brackets(&normalized[..cut]);
-
-    if title.is_empty() { normalized } else { title }
+/// Общая очистка названий фильмов, сериалов и поисковых запросов TMDB.
+pub(crate) fn clean_title(raw: &str) -> String {
+    parse_movie_filename(raw).0
 }
 
-/// Отрезает хвостовую скобочную группу (годы, релиз-группа) и одиночные скобки по краям
+/// Убирает незакрытую группу перед отрезанной меткой, сохраняя смысловые скобки.
 fn trim_brackets(raw: &str) -> String {
-    let without_tail = regex::Regex::new(r"[\(\[][^\(\)\[\]]*[\)\]]?\s*$")
-        .unwrap()
-        .replace(raw.trim(), "");
-
-    without_tail
-        .trim()
-        .trim_matches(['(', '[', ')', ']'])
-        .trim()
-        .to_string()
+    let mut open = Vec::new();
+    for (index, ch) in raw.char_indices() {
+        match ch {
+            '(' | '[' | '{' => open.push((index, ch)),
+            ')' | ']' | '}'
+                if open.last().is_some_and(|&(_, start)| {
+                    matches!((start, ch), ('(', ')') | ('[', ']') | ('{', '}'))
+                }) =>
+            {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    let cut = open.first().map(|&(index, _)| index).unwrap_or(raw.len());
+    raw[..cut].trim().trim_end_matches('-').trim().to_string()
 }
 
-/// Технические метки релиза (качество, кодеки, источник, озвучка)
-fn noise_pattern() -> regex::Regex {
-    regex::Regex::new(
-        r"(?i)\b(2160p|1080p|720p|480p|4k|uhd|bluray|blu ray|b[dr]rip|dvdrip|dvdscr|dvd|dcprip|web ?dl ?rip|web ?dl|web ?rip|hdrip|hdtv|camrip|tvrip|satrip|iptvrip|remux|repack|proper|x ?264|x ?265|hevc|avc|h 26[45]|xvid|divx|ac3|eac3|dts|truehd|aac|mp3|10bit|hdr|dub|dubbed|sub|subbed|multi|rus|eng)\b",
-    )
-    .unwrap()
+/// Однозначные технические метки: качество, кодеки и источник.
+fn noise_pattern() -> &'static Regex {
+    static NOISE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)\b(2160[pi]|1080[pi]|720[pi]|576[pi]|480[pi]|4k|uhd|blu[ -]?ray|bd[ -]?remux|b[dr]rip|dvdrip|dvdscr|dvd|dcprip|web[ -]?dl[ -]?rip|web[ -]?dl|web[ -]?rip|hdrip|hdtv|camrip|tvrip|satrip|iptvrip|remux|x[ -]?26[45]|hevc|avc|h[ -]?26[45]|xvid|divx|e[ -]?ac[ -]?3|ac[ -]?3|ddp(?:[ -]?\d)?|dd\+(?:\d)?|dts|truehd|aac|mp3|10[ -]?bit|hdr(?:10)?|dolby[ -]?vision)\b",
+        ).unwrap()
+    });
+    &NOISE
+}
+
+fn bracket_pattern() -> &'static Regex {
+    static BRACKETS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}").unwrap());
+    &BRACKETS
+}
+
+/// В обычном тексте спорные слова остаются частью названия. В хвосте релиза
+/// учитываем только прописные метки, а внутри скобок регистр не важен.
+fn weak_suffix_pattern() -> &'static Regex {
+    static WEAK_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b(?:PROPER|REPACK|MULTI|RUS|ENG|SUB|SUBBED|DUB|DUBBED)(?:[\s\[\](){}-]+(?:PROPER|REPACK|MULTI|RUS|ENG|SUB|SUBBED|DUB|DUBBED))*[\s\[\](){}-]*$").unwrap()
+    });
+    &WEAK_SUFFIX
+}
+
+fn include_weak_suffix(title: &str, cut: usize) -> usize {
+    weak_suffix_pattern()
+        .find(&title[..cut])
+        .filter(|m| title[..m.start()].chars().any(char::is_alphanumeric))
+        .map(|m| m.start())
+        .unwrap_or(cut)
+}
+
+fn release_cut(title: &str) -> Option<usize> {
+    static BRACKET_TAGS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^\s*(?:proper|repack|multi|rus|eng|sub|subbed|dub|dubbed)(?:[\s-]+(?:proper|repack|multi|rus|eng|sub|subbed|dub|dubbed))*\s*$").unwrap()
+    });
+    let strong = noise_pattern().find(title).map(|m| m.start());
+    let bracket = bracket_pattern()
+        .find_iter(title)
+        .find(|m| BRACKET_TAGS.is_match(&m.as_str()[1..m.len() - 1]))
+        .map(|m| m.start());
+    let cut = strong.into_iter().chain(bracket).min()?;
+    Some(include_weak_suffix(title, cut))
+}
+
+fn plausible_year(year: u32) -> bool {
+    (1888..=chrono::Utc::now().year() as u32 + 1).contains(&year)
+}
+
+fn bracket_year(body: &str) -> Option<u32> {
+    static YEAR_RANGE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s*(\d{4})(?:\s*[-–—]\s*(\d{4})?)?\s*$").unwrap());
+    let captures = YEAR_RANGE.captures(body)?;
+    let year = captures[1].parse().ok()?;
+    let valid_end = captures.get(2).is_none_or(|end| {
+        end.as_str()
+            .parse::<u32>()
+            .is_ok_and(|end| plausible_year(end) && end >= year)
+    });
+    (plausible_year(year) && valid_end).then_some(year)
+}
+
+/// Явный год в скобках имеет приоритет. Без скобок нужен хвост релизного имени;
+/// берём последний подходящий год, чтобы «Class.of.1999.1990» сохранил число в названии.
+fn release_year(
+    title: &str,
+    release_style: bool,
+    technical_cut: Option<usize>,
+) -> Option<(usize, u32)> {
+    static YEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{4}\b").unwrap());
+    static PART_SUFFIX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)^part\s*\d{1,2}$").unwrap());
+    let prefix = &title[..technical_cut.unwrap_or(title.len())];
+    let groups: Vec<_> = bracket_pattern().find_iter(prefix).collect();
+    if let Some(year) = groups.iter().rev().find_map(|group| {
+        let year = bracket_year(&group.as_str()[1..group.len() - 1])?;
+        prefix[..group.start()]
+            .chars()
+            .any(char::is_alphanumeric)
+            .then_some((group.start(), year))
+    }) {
+        return Some(year);
+    }
+
+    YEAR.find_iter(prefix)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .find_map(|m| {
+            let year = m.as_str().parse().ok()?;
+            if !plausible_year(year)
+                || !prefix[..m.start()].chars().any(char::is_alphanumeric)
+                || groups
+                    .iter()
+                    .any(|group| group.range().contains(&m.start()))
+            {
+                return None;
+            }
+            let suffix = prefix[m.end()..].trim();
+            let tags = weak_suffix_pattern()
+                .find(suffix)
+                .is_some_and(|m| m.start() == 0);
+            let part = PART_SUFFIX.is_match(suffix);
+            let context = release_style || technical_cut.is_some() || tags || part;
+            (context && (suffix.is_empty() || tags || part)).then_some((m.start(), year))
+        })
 }
 
 /// Парсит имя файла фильма для извлечения названия и года
@@ -397,30 +501,28 @@ fn parse_movie_filename(file_name: &str) -> (String, Option<u32>) {
     // Разделители в один пробел: дальше работаем с «человеческой» строкой
     let normalized = normalize_separators(file_name);
 
-    let year_pattern = regex::Regex::new(r"\b(19|20)\d{2}\b").unwrap();
-    // Год в самом начале — часть названия («2012», «1917»), а не метка релиза
-    let year_match = year_pattern.find_iter(&normalized).find(|m| m.start() > 0);
-    let year = year_match.and_then(|m| m.as_str().parse::<u32>().ok());
+    let technical_cut = release_cut(&normalized);
+    let year_match = release_year(&normalized, file_name.contains(['.', '_']), technical_cut);
+    let year = year_match.map(|(_, year)| year);
 
     // Всё, что идёт после года или первой технической метки, — мусор релиза
-    let cut = [
-        year_match.map(|m| m.start()),
-        noise_pattern().find(&normalized).map(|m| m.start()),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
-    .unwrap_or(normalized.len());
+    let cut = [year_match.map(|(start, _)| start), technical_cut]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(normalized.len());
+    let cut = if year_match.is_some() {
+        include_weak_suffix(&normalized, cut)
+    } else {
+        cut
+    };
 
-    let title = normalized[..cut]
-        .trim()
-        .trim_matches(['(', '[', ')', ']'])
-        .trim();
+    let title = trim_brackets(&normalized[..cut]);
 
     let title = if title.is_empty() {
         normalized.clone()
     } else {
-        title.to_string()
+        title
     };
 
     (title, year)
@@ -428,6 +530,8 @@ fn parse_movie_filename(file_name: &str) -> (String, Option<u32>) {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Datelike;
+
     use super::{
         BTreeMap, PathBuf, ScannedEpisode, ScannedMovie, episode_pattern, extract_series_title,
         merge_by_common_prefix, normalize_separators, parse_episode_numbers, parse_movie_filename,
@@ -593,6 +697,169 @@ mod tests {
                 (title.to_string(), year),
                 "{input}"
             );
+        }
+    }
+
+    #[test]
+    fn cleans_web_release_suffixes_from_movies_and_series() {
+        for tag in [
+            "WEB-DL",
+            "web-dl",
+            "WEBDL",
+            "WEB DL",
+            "WEB.DL",
+            "WEB_DL",
+            "WEB-DLRip",
+            "WEB-DL-Rip",
+            "WEB-Rip",
+        ] {
+            let input = format!("The Secret Life of Pets {tag} KP");
+            assert_eq!(
+                parse_movie_filename(&input),
+                ("The Secret Life of Pets".to_string(), None),
+                "{input}"
+            );
+            assert_eq!(series_title(&input, "S01E01"), "The Secret Life of Pets");
+            assert_eq!(
+                series_title("media", &format!("{input} S01E01")),
+                "The Secret Life of Pets"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_title_words_and_hyphens() {
+        for input in [
+            "Spider-Man Homecoming",
+            "The Web",
+            "Web of Lies",
+            "The WEB-DLish Story",
+        ] {
+            assert_eq!(parse_movie_filename(input), (input.to_string(), None));
+        }
+        assert_eq!(
+            parse_movie_filename("Spider-Man WEB-DL KP"),
+            ("Spider-Man".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn distinguishes_release_years_from_title_numbers() {
+        for (input, title, year) in [
+            ("Blade Runner 2049", "Blade Runner 2049", None),
+            (
+                "Blade.Runner.2049.2017.WEB-DL",
+                "Blade Runner 2049",
+                Some(2017),
+            ),
+            ("Blade Runner 2049 (2017)", "Blade Runner 2049", Some(2017)),
+            ("Wonder Woman 1984", "Wonder Woman 1984", None),
+            (
+                "Wonder.Woman.1984.(2020).1080p",
+                "Wonder Woman 1984",
+                Some(2020),
+            ),
+            ("Class of 1999", "Class of 1999", None),
+            ("Class.of.1999.1990.BluRay", "Class of 1999", Some(1990)),
+            ("2001 A Space Odyssey", "2001 A Space Odyssey", None),
+            (
+                "2001.A.Space.Odyssey.1968",
+                "2001 A Space Odyssey",
+                Some(1968),
+            ),
+            ("The Matrix 1999 WEB-DL", "The Matrix", Some(1999)),
+            ("The Matrix WEB-DL GROUP 2020", "The Matrix", None),
+            ("Summer of 1984 Stories", "Summer of 1984 Stories", None),
+            ("Movie.2099.WEB-DL", "Movie 2099", None),
+            ("Movie.1895.DVDRip", "Movie", Some(1895)),
+        ] {
+            assert_eq!(parse_movie_filename(input), (title.into(), year), "{input}");
+        }
+        let next_year = chrono::Utc::now().year() + 1;
+        assert_eq!(
+            parse_movie_filename(&format!("Movie ({next_year})")),
+            ("Movie".into(), Some(next_year as u32))
+        );
+    }
+
+    #[test]
+    fn ambiguous_tags_need_release_context() {
+        for title in [
+            "A Proper Man",
+            "Proper",
+            "The Sub",
+            "Multi",
+            "Dub",
+            "The Repack Story",
+        ] {
+            assert_eq!(parse_movie_filename(title), (title.into(), None));
+            assert_eq!(
+                parse_movie_filename(&format!("{title} WEB-DL KP")),
+                (title.into(), None),
+                "{title}"
+            );
+        }
+        for input in [
+            "Movie PROPER WEB-DL GROUP",
+            "Movie MULTI RUS ENG 1080p",
+            "Movie [RUS ENG]",
+            "Movie (DUB)",
+            "Movie.2020.PROPER",
+            "Movie.PROPER.(2020).WEB-DL",
+        ] {
+            assert_eq!(parse_movie_filename(input).0, "Movie", "{input}");
+        }
+    }
+
+    #[test]
+    fn preserves_meaningful_brackets() {
+        for title in [
+            "Birdman (or The Unexpected Virtue of Ignorance)",
+            "The Office (US)",
+            "Utopia (UK)",
+            "Movie [Special Edition]",
+        ] {
+            assert_eq!(parse_movie_filename(title), (title.into(), None), "{title}");
+            assert_eq!(series_title(title, "S01E01"), title);
+            assert_eq!(
+                parse_movie_filename(&format!("{title} [1080p] GROUP")).0,
+                title
+            );
+            assert_eq!(
+                parse_movie_filename(&format!("{title} (2020) WEB-DL")),
+                (title.into(), Some(2020))
+            );
+        }
+        assert_eq!(
+            series_title("Series (1969-1970) [1080p]", "S01E01"),
+            "Series"
+        );
+    }
+
+    #[test]
+    fn recognizes_extended_release_formats() {
+        for tag in [
+            "Blu-Ray",
+            "Blu.Ray",
+            "BDRemux",
+            "1080i",
+            "576p",
+            "HDR10+",
+            "Dolby Vision",
+            "Dolby.Vision",
+            "DDP5.1",
+            "DD+5.1",
+            "H.264",
+            "H-265",
+            "E-AC-3",
+        ] {
+            let input = format!("Movie {tag} GROUP");
+            assert_eq!(
+                parse_movie_filename(&input),
+                ("Movie".into(), None),
+                "{input}"
+            );
+            assert_eq!(series_title(&input, "S01E01"), "Movie", "{input}");
         }
     }
 }

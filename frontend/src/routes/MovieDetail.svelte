@@ -102,7 +102,6 @@
             <button bind:this={watchButton} onclick={handleWatch} class="btn btn--primary btn--large">
               Продолжить просмотр
             </button>
-            <button onclick={handleWatch} class="btn btn--large">Начать сначала</button>
           {:else}
             <button bind:this={watchButton} onclick={handleWatch} class="btn btn--primary btn--large">Смотреть</button>
           {/if}

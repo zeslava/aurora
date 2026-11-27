@@ -29,7 +29,17 @@ const isVisible = (el: HTMLElement): boolean => {
 };
 
 const collectFocusable = (): HTMLElement[] =>
-  Array.from(document.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(isVisible);
+  Array.from(document.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((el) => !el.hasAttribute('data-carousel-control') && isVisible(el));
+
+const focusAndReveal = (element: HTMLElement) => {
+  // Карусель сама ведёт фокус с запасом справа; scrollIntoView сбил бы её позицию.
+  const carousel = element.closest('[data-carousel]');
+  element.focus({ preventScroll: !!carousel });
+  if (!carousel) {
+    element.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+  }
+};
 
 const ROW_TOLERANCE = 4;
 
@@ -176,8 +186,7 @@ export const initSpatialNavigation = (onBack?: () => void) => {
         e.preventDefault();
         const target = rows[index + (direction === 'down' ? 1 : -1)];
         if (!target) return;
-        target[0].focus();
-        target[0].scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+        focusAndReveal(target[0]);
         return;
       }
     }
@@ -189,8 +198,7 @@ export const initSpatialNavigation = (onBack?: () => void) => {
       const target = row?.[row.indexOf(active) + (direction === 'right' ? 1 : -1)];
       if (target) {
         e.preventDefault();
-        target.focus();
-        target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+        focusAndReveal(target);
         return;
       }
     }
@@ -198,8 +206,7 @@ export const initSpatialNavigation = (onBack?: () => void) => {
     const next = pickCandidate(active, direction);
     if (next) {
       e.preventDefault();
-      next.focus();
-      next.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+      focusAndReveal(next);
     }
   };
 

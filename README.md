@@ -191,6 +191,64 @@ task android-deploy ANDROID_DEVICE=<ip-тв>:5555     # сборка + уста�
 
 Отладка: `chrome://inspect` на ПК показывает WebView приложения (консоль, Network).
 
+### Подписанный AAB для Google Play
+
+Для внутреннего тестирования и публикации собирается release `.aab` с upload-ключом.
+Play App Signing подписывает устанавливаемые APK своим ключом. Оболочка сохраняет
+`applicationId`: `ru.zeslava.aurora`; `compileSdk` и `targetSdk` — 36.
+
+Разово создайте upload-ключ (нужен `keytool` из JDK). Команда запросит пароль
+хранилища, сведения сертификата и пароль ключа:
+
+```bash
+mkdir -p .android-signing
+chmod 700 .android-signing
+keytool -genkeypair -keystore .android-signing/upload.jks -storetype JKS \
+  -alias aurora-upload -keyalg RSA -keysize 2048 -validity 10000
+chmod 600 .android-signing/upload.jks
+```
+
+Перед сборкой задайте путь к ключу, alias и пароли. `read` не сохраняет пароль
+в истории команд. Если пароли хранилища и ключа разные, запросите второй отдельно.
+
+```bash
+export AURORA_ANDROID_KEYSTORE="$PWD/.android-signing/upload.jks"
+export AURORA_ANDROID_KEY_ALIAS=aurora-upload
+printf 'Пароль хранилища: '
+read -rs AURORA_ANDROID_STORE_PASSWORD
+printf '\n'
+export AURORA_ANDROID_STORE_PASSWORD
+export AURORA_ANDROID_KEY_PASSWORD="$AURORA_ANDROID_STORE_PASSWORD"
+
+scripts/build-android.sh --aab
+# или: task android-aab
+# с адресом демо по умолчанию:
+scripts/build-android.sh --aab https://aurora-demo.domdev.su
+# результат: build/aab/aurora-<version>.aab
+```
+
+Если переменные с `export` сохранены локально в `.android-signing/signing.env`,
+вместо ручного ввода можно выполнить `source .android-signing/signing.env`.
+Для CI передавайте эти переменные через хранилище секретов. Keystore монтируется
+в контейнер только для чтения, пароли передаются через окружение, без аргументов
+Gradle. Скрипт проверяет подпись AAB и соответствие сертификата выбранному ключу
+до копирования артефакта в `build/aab/`. Без параметров подписи release не собирается;
+обычный debug APK по-прежнему собирается без них.
+
+Версия берётся из `frontend/package.json`. По умолчанию `versionCode` вычисляется
+как `major * 10000 + minor * 100 + patch` (minor и patch должны быть меньше 100).
+Для повторной загрузки той же версии увеличьте код вручную:
+
+```bash
+AURORA_ANDROID_VERSION_CODE=104 task android-aab
+```
+
+Каждая новая загрузка в Google Play требует ещё не использованный `versionCode`;
+для обновления установленной версии он должен быть больше предыдущего.
+`.android-signing/`, `*.jks` и `*.keystore` исключены из Git. Сохраните резервную
+копию ключа, alias и паролей вне репозитория. После сборки загрузите AAB в
+Play Console → Testing → Internal testing и настройте Play App Signing.
+
 ## Разработка
 
 ```bash

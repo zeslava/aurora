@@ -87,7 +87,7 @@
   }
 
   .tile--row {
-    width: 16rem;
+    width: min(var(--tile-row-width), calc(100vw - var(--space-12)));
     flex-shrink: 0;
   }
 

@@ -2134,18 +2134,30 @@ async fn get_progress_handler(
 ) -> Result<Response, StatusCode> {
     let user_id = claims.user_id;
 
-    // Резолвим файл по id (фильм или эпизод) — прогресс хранится на уровне файла
+    // У фильма и эпизода прогресс хранится на уровне файла, у сериала — сводка эпизодов.
     let file = state
         .db
         .resolve_media_file(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let result = if let Some(file) = file {
+        state.db.get_playback_state(user_id, file.id, id).await
+    } else {
+        let media = state
+            .db
+            .get_media_item_by_id(&id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .filter(|media| media.media_type == MediaType::TvSeries)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        state.db.get_series_playback_state(user_id, &media.id).await
+    };
 
     // «Ещё не смотрели» — это не ошибка, а нормальный ответ: 404 здесь означал бы, что нет
     // самого медиа. Отдаём `null`, иначе каждый непросмотренный айтем в библиотеке засоряет
     // консоль клиента красной строкой (на webOS её видно только через ares-inspect).
-    let progress = match state.db.get_playback_state(user_id, file.id, id).await {
+    let progress = match result {
         Ok(Some(progress)) => Some(progress),
         Ok(None) => None,
         Err(e) => {
@@ -3613,6 +3625,65 @@ mod tests {
         config.strict_auth = strict_auth;
         state.config = Arc::new(config);
         state
+    }
+
+    #[tokio::test]
+    async fn series_progress_endpoint_returns_summary() {
+        let state = auth_state(true).await;
+        let series = state
+            .db
+            .insert_media_item(None, "Сериал", None, &MediaType::TvSeries, None)
+            .await
+            .unwrap();
+        let uri = format!("/api/media/{series}/progress");
+        let (status, headers, body) = get(&state, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(body, b"null");
+
+        let movie = state
+            .db
+            .get_media_items(Some(&MediaType::Movie))
+            .await
+            .unwrap()
+            .remove(0);
+        let file = state
+            .db
+            .resolve_media_file(&movie.id)
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .db
+            .insert_episode(&series, 1, 1, None, file.id)
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_playback_state(1, file.id, 8, true, None)
+            .await
+            .unwrap();
+        let (status, _, body) = get(&state, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let progress: PlaybackState = serde_json::from_slice(&body).unwrap();
+        assert!(progress.completed);
+        assert_eq!(progress.media_id, series);
+        for id in [
+            &movie.id,
+            &state.db.get_episodes(&series).await.unwrap()[0].id,
+        ] {
+            let (status, _, body) = get(&state, &format!("/api/media/{id}/progress"), None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                serde_json::from_slice::<PlaybackState>(&body)
+                    .unwrap()
+                    .completed
+            );
+        }
+        assert_eq!(
+            get(&state, "/api/media/missing/progress", None).await.0,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

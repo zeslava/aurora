@@ -20,5 +20,8 @@ cfgy.yaml
 
 # локальные инструменты и артефакты сборки
 /build
+/.android-signing/
+*.jks
+*.keystore
 graphify-out/
 .serena/

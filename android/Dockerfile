@@ -18,7 +18,7 @@ RUN wget -q https://dl.google.com/android/repository/commandlinetools-linux-${CM
  && mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest \
  && rm /tmp/tools.zip \
  && yes | sdkmanager --licenses > /dev/null \
- && sdkmanager "platforms;android-35" "build-tools;34.0.0" "platform-tools" > /dev/null
+ && sdkmanager "platforms;android-36" "build-tools;35.0.0" "platform-tools" > /dev/null
 
 RUN wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -O /tmp/gradle.zip \
  && unzip -q /tmp/gradle.zip -d /opt \

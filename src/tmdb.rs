@@ -363,19 +363,11 @@ fn is_cyrillic(s: &str) -> bool {
 /// разделители и лишние пробелы. Названия сериалов приходят из имени директории
 /// в нижнем регистре — для TMDB регистр не важен.
 fn normalize_query(title: &str) -> String {
-    let cleaned = title.replace(['.', '_', '-'], " ");
-
-    let junk = regex::Regex::new(
-        r"(?i)\b(1080p|720p|480p|2160p|4k|bluray|blu ray|bdrip|dvdrip|webrip|web dl|hdtv|hdrip|x264|x265|hevc|h 264|h 265|aac|ac3|dts|remux|proper|repack|rus|eng|sub|dub)\b",
-    )
-    .unwrap();
-    let cleaned = junk.replace_all(&cleaned, " ");
-
-    // Скобочные группы релиз-команд и остатки года в скобках
-    let brackets = regex::Regex::new(r"[\[\(\{][^\]\)\}]*[\]\)\}]").unwrap();
-    let cleaned = brackets.replace_all(&cleaned, " ");
-
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::scanner::clean_title(title)
+        .replace('-', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -386,10 +378,37 @@ mod tests {
     fn normalize_query_strips_release_junk() {
         assert_eq!(
             normalize_query("The.Matrix.1080p.BluRay.x264-GROUP"),
-            "The Matrix GROUP"
+            "The Matrix"
         );
+        assert_eq!(
+            normalize_query("The Secret Life of Pets WEB-DL KP"),
+            "The Secret Life of Pets"
+        );
+        assert_eq!(
+            normalize_query("The.Secret.Life.of.Pets.WEB-DLRip.KP"),
+            "The Secret Life of Pets"
+        );
+        assert_eq!(normalize_query("The Matrix [1080p] GROUP"), "The Matrix");
         assert_eq!(normalize_query("Интерстеллар [2014]"), "Интерстеллар");
         assert_eq!(normalize_query("breaking bad"), "breaking bad");
+    }
+
+    #[test]
+    fn normalize_query_preserves_title_context() {
+        for (input, expected) in [
+            ("Blade Runner 2049", "Blade Runner 2049"),
+            ("Blade.Runner.2049.2017.WEB-DL", "Blade Runner 2049"),
+            ("Wonder Woman 1984 (2020)", "Wonder Woman 1984"),
+            ("Class of 1999", "Class of 1999"),
+            ("A Proper Man", "A Proper Man"),
+            ("The Sub WEB-DL", "The Sub"),
+            ("The Office (US) [1080p]", "The Office (US)"),
+            ("Movie Dolby.Vision GROUP", "Movie"),
+            ("Movie DDP5.1 GROUP", "Movie"),
+            ("Spider-Man WEB-DL", "Spider Man"),
+        ] {
+            assert_eq!(normalize_query(input), expected, "{input}");
+        }
     }
 
     /// Разбирает кандидатов из настоящего ответа TMDB
